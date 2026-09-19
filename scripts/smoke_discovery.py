@@ -23,16 +23,21 @@ def main() -> int:
     )
     parser.add_argument("--objective", required=True)
     parser.add_argument("--model-profile", default=None)
+    parser.add_argument("--query-hints", default="mcp,discovery,run_discovery")
     args = parser.parse_args()
 
     config = HeadroomAgentConfig.from_sources()
     llm_client = OpenAICompatibleLLMClient(config=config) if config.llm_profiles else None
-    service = DiscoveryService(llm_client=llm_client)
+    service = DiscoveryService(
+        llm_client=llm_client,
+        default_model_profile=config.default_model_profile,
+        llm_evidence_char_budget=config.llm_evidence_char_budget,
+    )
     request = DiscoveryRequest(
         objective=args.objective,
         objective_type=ObjectiveType(args.objective_type),
         scope_paths=[str(Path(args.scope).resolve())],
-        query_hints=["mcp", "discovery", "run_discovery"],
+        query_hints=[hint.strip() for hint in args.query_hints.split(",") if hint.strip()],
         command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
         model_profile=args.model_profile,
     )

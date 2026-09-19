@@ -38,13 +38,14 @@
 - Suite locale finale dopo hardening large-file / bounded-fetch 2026-09-19: `38 passed`
 - Suite locale dopo fix F23 (snippet centrati sul match) 2026-09-19: `41 passed`
 - Suite locale dopo fix F10 (logs_triage) + F16 (argomenti piatti) 2026-09-19: `49 passed`
+- Suite locale dopo `web_research` + evidenza JSON compressa 2026-09-19: `61 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
   - venv su `Z:` fallisce per esecuzione UNC/permessi
   - venv su `C:\Users\giova\.venvs\...` funziona
 - DGX:
-  - `scripts/run_tests_dgx.sh` -> `10 passed`
+  - `scripts/run_tests_dgx.sh` -> `61 passed`
   - `scripts/smoke_check_dgx.sh` -> `ok server=headroom_agent_mcp`
   - `scripts/smoke_openrouter_headroom_dgx.sh` -> risposta JSON valida di `codebase_discovery` con ranking file/simboli/snippet
 
@@ -98,15 +99,42 @@
   - F22 chiuso: anche il fetch diretto di URL e' bounded e la documentazione del tool/README ora dichiara esplicitamente questo limite operativo
   - F23 chiuso: gli snippet non sono piu' tagliati dal solo prefisso del blocco; la finestra e' centrata sulla colonna del match, quindi su sorgenti a riga lunga (JS minificato, JSON su una riga, CSV/log a riga singola) l'evidenza contiene davvero il termine cercato invece di essere muta
   - F23 verificato con 3 regressioni: needle in fondo a riga lunga, JSON minificato su una riga, e caso multi-riga normale che resta invariato (nessun marcatore di ellissi)
+  - F13 CHIUSO 2026-09-19: `HEADROOM_PROXY_URL` e' ora impostato nell'env di `headroom_agent_discovery` in `~/.openclaw/openclaw.json`, il proxy gira come servizio stabile su `127.0.0.1:8788` e il percorso proxato e' esercitato davvero (`api_requests=1`, `requests_compressed=1`)
   - residui NON affrontati in questo passaggio:
     - analisi istanze multiple lato host (`F12`): dopo `mcp reload` osservata una sola istanza; resta nota operativa, non difetto di codice
-    - esercizio automatico del proxy Headroom (`F13`): `HEADROOM_PROXY_URL` non e' impostato nel launcher stdio live, quindi il percorso proxy non e' esercitato in produzione
   - F10 chiuso: in `logs_triage` i path di test/fixture (`tests`, `test`, `__tests__`, `spec`, `specs`) vengono ignorati quando esistono log reali; i findings sono deduplicati e ordinati per severita' (error > warning > info); uno scope esplicito su un singolo file di test resta rispettato
   - F16 chiuso: il tool `run_discovery` accetta ora anche argomenti piatti (`objective`, `objective_type`, `scope_paths`, ...) mantenendo `params` come busta retro-compatibile, cosi' OpenClaw e i client esistenti continuano a funzionare
   - `scripts/run_tests_dgx.sh` ora fa `cd "$ROOT_DIR"` prima di pytest: senza quel `cd` i 4 test smoke con path relativi fallivano a torto
   - suite locale dopo `response_language` esplicito + fairness round-robin snippet: `36 passed`
   - suite locale dopo fix F23 (snippet centrati sulla colonna del match): `41 passed`
   - suite locale dopo fix F10 + F16 (argomenti piatti + logs_triage): `49 passed`
+  - suite locale dopo `web_research` + evidenza JSON compressa: `61 passed`
+
+## Proxy Headroom + web_research (2026-09-19)
+
+Manual operativo completo: `.agent/README-headroom-proxy.md` (leggere quello prima di toccare proxy/venv/wiring).
+
+- `web_research` aggiunto come `ObjectiveType`, con `search_results_limit` (1-10, default 5) e `search_provider` (`brave` / `tavily` / auto)
+- nuovo modulo `src/headroom_agent_mcp/websearch.py`:
+  - `extract_readable_text` (trafilatura se disponibile, altrimenti parser stdlib) — il boilerplate HTML sparisce prima del preview
+  - `fetch_url_readable` (fetch bounded + readability)
+  - `search_web` con backend Brave (`BRAVE_API_KEY`) e Tavily (`TAVILY_API_KEY`)
+- `service.py`: `_run_web_research` delega tutta la ricerca al tool, `_fetch_url` ora usa il fetch leggibile, `_format_llm_evidence` emette **JSON** con un item per sezione di documento
+- `config.py`:
+  - `llm_evidence_char_budget` (12000 diritta, 40000 con proxy, override `HEADROOM_AGENT_LLM_EVIDENCE_CHARS`)
+  - `timeout_seconds` 45s diritta, 120s con proxy (la compressione aggiunge latenza; 45s faceva andare in timeout l'endpoint proxato)
+- `server.py`: argomenti piatti anche per `search_results_limit` / `search_provider`, docstring aggiornata
+- `scripts/smoke_discovery.py` passava il service **senza** `default_model_profile` -> `llm_enriched=false` e `api_requests=0`; corretto
+- Runtime DGX:
+  - venv Linux per il repo `headroom` (`scripts/setup_headroom_runtime_dgx.sh`), `headroom-ai[proxy]` 0.37.0
+  - `headroom-ai[ml]` installato (`scripts/setup_headroom_ml_dgx.sh`) -> Kompress disponibile
+  - proxy avviato come servizio: `scripts/headroom_proxy_service_dgx.sh start` -> `127.0.0.1:8788`, `--mode token`, `--no-ccr`
+  - MCP ufficiale `headroom` registrato in `~/.openclaw/openclaw.json` (`3 tools`) + `HEADROOM_PROXY_URL` nell'env del nostro MCP (`1 tools`)
+- Misure reali (dettaglio in `.agent/README-headroom-proxy.md`):
+  - framing prose -> 4.5% di token risparmiati; JSON con >=10 item -> ~74%; JSON con 5 item -> 0%
+  - `web_research` E2E: `before=12938 after=8091 saved=4847` -> **41.8%** con `llm_enriched=true` e summary ricco
+  - con CCR attivo: 72.5% ma il summary peggiora ("retrieve the full compressed excerpts") -> CCR resta OFF di default
+  - i nomi tool `WebSearch`/`WebFetch`/`web_search`/`web_fetch` sono in `DEFAULT_VERBATIM_EXCLUDE_TOOLS` di Headroom e non vengono mai compressi in modo lossy: non usare quei nomi per l'evidenza
 
 ## Prossimi step consigliati
 

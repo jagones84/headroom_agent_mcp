@@ -11,6 +11,7 @@ class ObjectiveType(str, Enum):
     DOCS_RESEARCH = "docs_research"
     LOGS_TRIAGE = "logs_triage"
     CODEBASE_DISCOVERY = "codebase_discovery"
+    WEB_RESEARCH = "web_research"
 
 
 class CommandAllowlistProfile(str, Enum):
@@ -68,6 +69,8 @@ class DiscoveryRequest(BaseModel):
     raw_read_budget: int = Field(default=4, ge=1, le=20)
     model_profile: str | None = None
     response_language: str = Field(default="en", min_length=1)
+    search_results_limit: int = Field(default=5, ge=1, le=10)
+    search_provider: str | None = None
 
     @field_validator("objective")
     @classmethod

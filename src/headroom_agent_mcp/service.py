@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-
-import httpx
 
 from .config import RequestDefaults
 from .llm import OpenAICompatibleLLMClient
@@ -21,6 +20,7 @@ from .models import (
     SmallSnippet,
 )
 from .terminal import run_allowed_commands
+from .websearch import fetch_url_readable, search_web
 
 
 SKIP_DIR_NAMES = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
@@ -49,7 +49,7 @@ TEXT_FILE_NAMES = {
     "procfile",
 }
 TEXT_READ_LIMIT = 20_000
-HTTP_FETCH_TIMEOUT_SECONDS = 15.0
+EVIDENCE_SECTION_CHARS = 1200
 TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "specs"}
 MAX_LOG_FINDINGS = 8
 SEVERITY_RANK_PATTERNS = (
@@ -77,6 +77,7 @@ class DiscoveryService:
         default_model_profile: str | None = None,
         request_defaults: RequestDefaults | dict[str, object] | None = None,
         command_profiles: dict[CommandAllowlistProfile, list[list[str]]] | None = None,
+        llm_evidence_char_budget: int = 12000,
     ) -> None:
         self.llm_client = llm_client
         self.default_model_profile = default_model_profile
@@ -86,13 +87,19 @@ class DiscoveryService:
             else RequestDefaults.model_validate(request_defaults or {})
         )
         self.command_profiles = command_profiles or {}
+        self.llm_evidence_char_budget = max(int(llm_evidence_char_budget), 1000)
+        self.url_text_limit = max(TEXT_READ_LIMIT, self.llm_evidence_char_budget)
+        self._llm_documents: list[EvidenceDocument] = []
 
     def run(self, request: DiscoveryRequest) -> DiscoveryResponse:
         request = self._apply_request_defaults(request)
+        self._llm_documents = []
         if request.objective_type is ObjectiveType.CODEBASE_DISCOVERY:
             response = self._run_codebase_discovery(request)
         elif request.objective_type is ObjectiveType.LOGS_TRIAGE:
             response = self._run_logs_triage(request)
+        elif request.objective_type is ObjectiveType.WEB_RESEARCH:
+            response = self._run_web_research(request)
         else:
             response = self._run_docs_research(request)
 
@@ -181,6 +188,86 @@ class DiscoveryService:
                 "Read the top raw log file raw and follow the first failing stack frame or timeout boundary."
             ),
             confidence="medium" if findings else "low",
+        )
+
+    def _build_search_query(self, request: DiscoveryRequest) -> str:
+        """Combine the objective with a few hints into a single search query."""
+        hints = [hint.strip() for hint in request.query_hints if hint.strip()]
+        if hints:
+            return f"{request.objective} {' '.join(hints[:4])}".strip()
+        return request.objective.strip()
+
+    def _run_web_research(self, request: DiscoveryRequest) -> DiscoveryResponse:
+        """Delegate the whole web search to the subagent.
+
+        The parent passes an objective, not URLs: this mode searches the web, fetches the
+        results, extracts readable text, and hands the (large) evidence to the proxied LLM so
+        Headroom compresses it instead of the parent context absorbing it.
+        """
+        query = self._build_search_query(request)
+        search_error = ""
+        try:
+            results, provider = search_web(query, request.search_results_limit, request.search_provider)
+        except Exception as exc:
+            results, provider, search_error = [], None, str(exc)
+
+        terms = self._search_terms(request)
+        documents: list[EvidenceDocument] = []
+        findings: list[str] = []
+        for result in results:
+            text, truncated = self._fetch_url(result.url)
+            if not text:
+                text = result.snippet
+                truncated = False
+            if not text.strip():
+                continue
+            documents.append(
+                EvidenceDocument(
+                    path=result.url,
+                    text=text,
+                    score=self._score_text(result.url, text, terms),
+                    truncated=truncated,
+                )
+            )
+            if result.snippet:
+                findings.append(f"{result.title or result.url}: {result.snippet[:200]}")
+
+        documents.sort(key=lambda item: item.score, reverse=True)
+        candidate_files = [
+            CandidateFile(path=doc.path, reason="Web search result", score=round(doc.score, 2))
+            for doc in documents[: request.max_files]
+        ]
+        snippets = self._build_snippets(documents, request)
+        self._llm_documents = documents
+
+        uncertainties = self._truncation_uncertainties(documents[: request.max_files])
+        if search_error:
+            uncertainties.append(f"Web search failed: {search_error}")
+        elif provider is None:
+            uncertainties.append(
+                "No web search provider available: set BRAVE_API_KEY or TAVILY_API_KEY, or pass search_provider."
+            )
+        elif not documents:
+            uncertainties.append(f"Provider '{provider}' returned no usable page content for query '{query}'.")
+        else:
+            uncertainties.append("Cross-check these extracted pages against their sources before acting.")
+
+        return DiscoveryResponse(
+            summary=(
+                f"Web research via {provider or 'no provider'}: {len(documents)} readable sources for '{query}'."
+            ),
+            objective_type=request.objective_type,
+            relevant_findings=findings or ["No readable web evidence collected."],
+            candidate_files=candidate_files,
+            candidate_symbols=[],
+            small_snippets=snippets if request.return_snippets else [],
+            commands_run=[],
+            raw_reads_needed_by_parent=[item.path for item in candidate_files[: request.raw_read_budget]],
+            uncertainties=uncertainties,
+            recommended_next_action=(
+                "Use the extracted text as primary evidence; open the original URL only if a detail is contested."
+            ),
+            confidence="medium" if documents else "low",
         )
 
     def _run_docs_research(self, request: DiscoveryRequest) -> DiscoveryResponse:
@@ -289,29 +376,13 @@ class DiscoveryService:
             return "", False
 
     def _fetch_url(self, url: str) -> tuple[str, bool]:
-        try:
-            with httpx.stream("GET", url, timeout=HTTP_FETCH_TIMEOUT_SECONDS, follow_redirects=True) as response:
-                response.raise_for_status()
-                parts: list[str] = []
-                chars_read = 0
-                truncated = False
-                for chunk in response.iter_text():
-                    if not chunk:
-                        continue
-                    remaining = TEXT_READ_LIMIT - chars_read
-                    if remaining <= 0:
-                        truncated = True
-                        break
-                    if len(chunk) > remaining:
-                        parts.append(chunk[:remaining])
-                        chars_read += remaining
-                        truncated = True
-                        break
-                    parts.append(chunk)
-                    chars_read += len(chunk)
-                return "".join(parts), truncated
-        except httpx.HTTPError:
+        """Fetch a URL, extract readable text, then bound it to the preview budget."""
+        text, truncated = fetch_url_readable(url)
+        if not text:
             return "", False
+        if len(text) > self.url_text_limit:
+            return text[: self.url_text_limit], True
+        return text, truncated
 
     def _score_text(self, path: str, text: str, terms: list[str]) -> float:
         if not terms:
@@ -551,7 +622,11 @@ class DiscoveryService:
                     "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
                     "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
                     f"Respond in {response_language}. This output-language instruction overrides any language suggested by the objective, summary, or evidence. "
-                    "Return JSON with optional keys: summary, recommended_next_action, confidence."
+                    "Return JSON with optional keys: summary, recommended_next_action, confidence. "
+                    "The evidence is a JSON document whose evidence_items array holds one excerpt per item. "
+                    "Some excerpts may be shortened by a context compressor: never mention compression, retrieval, "
+                    "truncation, or missing detail, and never ask to fetch or retrieve more. Synthesize only what the "
+                    "excerpts do state; lower confidence instead of narrating the gap."
                 ),
                 user_prompt=(
                     f"Objective: {request.objective}\n"
@@ -559,7 +634,7 @@ class DiscoveryService:
                     f"Existing summary: {response.summary}\n"
                     f"Relevant findings: {response.relevant_findings}\n"
                     f"Raw reads for parent: {response.raw_reads_needed_by_parent}\n"
-                    f"Grounded evidence:\n{grounded_evidence}\n"
+                    f"Evidence JSON:\n{grounded_evidence}\n"
                 ),
             )
         except Exception as exc:
@@ -575,24 +650,107 @@ class DiscoveryService:
         for key in ("summary", "recommended_next_action", "confidence"):
             if isinstance(llm_json.get(key), str) and llm_json[key]:
                 payload[key] = llm_json[key]
+        print(
+            f"[headroom_agent_mcp] LLM enrichment keys={sorted(llm_json)} "
+            f"summary_chars={len(llm_json.get('summary') or '')}",
+            file=sys.stderr,
+        )
         payload["llm_enriched"] = True
         payload["llm_error"] = None
         payload["llm_profile_used"] = model_profile
         return DiscoveryResponse.model_validate(payload)
 
     def _format_llm_evidence(self, response: DiscoveryResponse) -> str:
-        evidence_lines: list[str] = []
+        """Build the grounded evidence payload handed to the LLM.
+
+        The payload is structured JSON because that is the shape Headroom
+        compresses: its ContentRouter routes JSON arrays to SmartCrusher, which
+        keeps first/last, error and query-relevant items and drops the rest.
+        Measured through the proxy, a JSON evidence payload saves ~74% of prompt
+        tokens while the same content as prose saves only ~4%. Each document is
+        therefore emitted as one item per section instead of a single text blob.
+        """
+        remaining = self.llm_evidence_char_budget
+        items: list[dict[str, object]] = []
         for item in response.candidate_files[:4]:
-            evidence_lines.append(f"FILE {item.path} | score={item.score} | reason={item.reason}")
+            items.append(
+                {
+                    "kind": "file",
+                    "source": item.path,
+                    "score": round(item.score, 3),
+                    "reason": item.reason,
+                }
+            )
         for symbol in response.candidate_symbols[:8]:
-            evidence_lines.append(f"SYMBOL {symbol.path}::{symbol.symbol} | kind={symbol.kind}")
+            items.append(
+                {
+                    "kind": "symbol",
+                    "source": symbol.path,
+                    "symbol": symbol.symbol,
+                    "reason": symbol.kind,
+                }
+            )
         for snippet in response.small_snippets[:6]:
-            evidence_lines.append(f"SNIPPET {snippet.path}:\n{snippet.snippet}")
+            items.append({"kind": "snippet", "source": snippet.path, "text": snippet.snippet})
         for finding in response.relevant_findings[:8]:
-            evidence_lines.append(f"FINDING {finding}")
-        if not evidence_lines:
-            return "(no grounded evidence collected)"
-        return "\n---\n".join(evidence_lines)
+            items.append({"kind": "finding", "text": finding})
+
+        for rank, document in enumerate(self._llm_documents, start=1):
+            if remaining <= 0:
+                break
+            text = document.text[:remaining]
+            remaining -= len(text)
+            for section_index, section in enumerate(self._split_evidence_sections(text)):
+                items.append(
+                    {
+                        "kind": "document",
+                        "rank": rank,
+                        "source": document.path,
+                        "section": section_index,
+                        "score": round(document.score, 3),
+                        "text": section,
+                    }
+                )
+
+        payload = {
+            "objective_type": response.objective_type.value,
+            "evidence_items": items,
+            "uncertainties": list(response.uncertainties),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _split_evidence_sections(text: str, chunk_chars: int = EVIDENCE_SECTION_CHARS) -> list[str]:
+        """Split a document into ranked-sized sections.
+
+        The compressor only has something to discard when the payload holds many
+        items, so each section becomes its own JSON item.
+        """
+        if not text.strip():
+            return []
+        sections: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for raw_block in text.split("\n\n"):
+            block = raw_block.strip()
+            if not block:
+                continue
+            while len(block) > chunk_chars:
+                if current:
+                    sections.append("\n\n".join(current))
+                    current = []
+                    current_len = 0
+                sections.append(block[:chunk_chars])
+                block = block[chunk_chars:]
+            if current and current_len + len(block) > chunk_chars:
+                sections.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            current.append(block)
+            current_len += len(block)
+        if current:
+            sections.append("\n\n".join(current))
+        return sections
 
     def _language_instruction(self, response_language: str) -> str:
         normalized = response_language.strip().lower()
@@ -609,6 +767,6 @@ class DiscoveryService:
         if len(truncated_paths) > 3:
             preview += f" (+{len(truncated_paths) - 3} more)"
         return [
-            f"Some sources were truncated to the first {TEXT_READ_LIMIT} characters: {preview}. "
+            f"Some sources were truncated to a bounded preview: {preview}. "
             "Read them raw before treating missing matches as evidence of absence."
         ]

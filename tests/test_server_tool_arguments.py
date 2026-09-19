@@ -16,6 +16,7 @@ class _NoLLMConfig:
     default_model_profile = None
     request_defaults = RequestDefaults()
     command_profiles: dict = {}
+    llm_evidence_char_budget = 12000
 
     @classmethod
     def from_sources(cls, config_path=None):

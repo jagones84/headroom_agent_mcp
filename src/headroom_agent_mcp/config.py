@@ -44,6 +44,7 @@ class HeadroomAgentConfig(BaseModel):
     request_defaults: RequestDefaults = Field(default_factory=RequestDefaults)
     command_profiles: dict[CommandAllowlistProfile, list[list[str]]] = Field(default_factory=dict)
     default_model_profile: str | None = None
+    llm_evidence_char_budget: int = 12000
 
     @staticmethod
     def _tokenize_profile_commands(raw_profiles: dict[str, Any]) -> dict[CommandAllowlistProfile, list[list[str]]]:
@@ -78,20 +79,23 @@ class HeadroomAgentConfig(BaseModel):
         if config_file.exists():
             yaml_data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
 
+        proxy_url = os.getenv("HEADROOM_PROXY_URL") or yaml_data.get("headroom_proxy_url")
+
         profiles: dict[str, LLMProfile] = {}
         provider = os.getenv("HEADROOM_AGENT_MODEL_PROVIDER", "openrouter")
         model = os.getenv("HEADROOM_AGENT_MODEL_NAME", "deepseek/deepseek-v4-flash")
         base_url = os.getenv("HEADROOM_AGENT_BASE_URL", "https://openrouter.ai/api/v1")
         api_key_env_raw = os.getenv("HEADROOM_AGENT_API_KEY_ENV", "HEADROOM_AGENT_API_KEY").strip()
         api_key_env = api_key_env_raw or None
+        default_timeout = "120" if proxy_url else "45"
         profiles[provider] = LLMProfile(
             model=model,
             base_url=base_url,
             api_key_env=api_key_env,
             require_api_key=cls._env_flag("HEADROOM_AGENT_REQUIRE_API_KEY", True),
             supports_json_response_format=cls._env_flag("HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT", True),
-            timeout_seconds=float(os.getenv("HEADROOM_AGENT_TIMEOUT_SECONDS", "45")),
-            use_headroom_proxy=bool(os.getenv("HEADROOM_PROXY_URL")),
+            timeout_seconds=float(os.getenv("HEADROOM_AGENT_TIMEOUT_SECONDS", default_timeout)),
+            use_headroom_proxy=bool(proxy_url),
         )
 
         llm_profiles = yaml_data.get("llm_profiles", {})
@@ -101,10 +105,17 @@ class HeadroomAgentConfig(BaseModel):
         defaults = RequestDefaults.model_validate(yaml_data.get("defaults", {}))
         command_profiles = cls._tokenize_profile_commands(yaml_data.get("profiles", {}))
 
+        configured_budget = os.getenv("HEADROOM_AGENT_LLM_EVIDENCE_CHARS", "").strip()
+        if configured_budget.isdigit():
+            evidence_budget = int(configured_budget)
+        else:
+            evidence_budget = 40000 if proxy_url else 12000
+
         return cls(
-            headroom_proxy_url=os.getenv("HEADROOM_PROXY_URL") or yaml_data.get("headroom_proxy_url"),
+            headroom_proxy_url=proxy_url,
             llm_profiles=profiles,
             request_defaults=defaults,
             command_profiles=command_profiles,
             default_model_profile=provider if provider in profiles else None,
+            llm_evidence_char_budget=evidence_budget,
         )
