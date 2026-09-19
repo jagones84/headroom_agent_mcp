@@ -40,13 +40,15 @@
 - Suite locale dopo fix F10 (logs_triage) + F16 (argomenti piatti) 2026-09-19: `49 passed`
 - Suite locale dopo `web_research` + evidenza JSON compressa 2026-09-19: `61 passed`
 - Suite locale dopo retrieval CCR + hardening client LLM 2026-09-19 (sessione 2): `66 passed`
+- Suite locale dopo catena fallback websearch 2026-09-19 (sessione 3): `73 passed`
+- Suite locale dopo retry CCR metadata-only 2026-09-19 (sessione 4): `78 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
   - venv su `Z:` fallisce per esecuzione UNC/permessi
   - venv su `C:\Users\giova\.venvs\...` funziona
 - DGX:
-  - `scripts/run_tests_dgx.sh` -> `66 passed`
+  - `scripts/run_tests_dgx.sh` -> `78 passed`
   - `scripts/smoke_check_dgx.sh` -> `ok server=headroom_agent_mcp`
   - `scripts/smoke_openrouter_headroom_dgx.sh` -> risposta JSON valida di `codebase_discovery` con ranking file/simboli/snippet
 
@@ -177,6 +179,18 @@ Obiettivo: tenere ~75% di risparmio **senza** degradare il summary, dando al LLM
 - Se TUTTI i provider vanno in errore -> `search_web` solleva e `service.py` riporta "Web search failed"; se uno ritorna vuoto -> incertezza con il provider provato.
 - Verifica: 7 test nuovi (catena, fallback, parser DDG, decode URL) -> suite locale `73 passed`.
 - Verifica LIVE sul DGX (venv `headroom_agent_mcp`): `search_web("headroom context compression", 5, "duckduckgo")` -> `provider_used=duckduckgo results=5`, titoli reali e URL de-rimbalzati. Da Windows la stessa chiamata viene resettata (`WinError 10054`) -> blocco anti-bot/host-local, non un bug del codice; il MCP gira sul DGX dove funziona.
+
+## Cap 3 round CCR + retry metadata-only (2026-09-19, sessione 4)
+
+- Report §5.16 confermato sul campo 2/2 + le mie run: con CCR on il modello (deepseek-v4-flash) chiede ~8-10 `headroom_retrieve` e il proxy, oltre `ccr_max_retrieval_rounds = 3` (`headroom/proxy/models.py:208`), restituisce i tool_calls aperti al client -> `finish_reason='tool_calls'`, content vuoto -> `llm_enriched=false`, fallback meccanico. Compressione OK (71-75%), risposta KO.
+- Risposta alla domanda "il cap si alza?": **no, con mezzi supportati**. Verificato in `headroom/proxy/models.py`, `headroom/cli/proxy.py`, `headroom/settings_store.py`: NESSUN flag CLI, env var o chiave settings per `ccr_max_retrieval_rounds`. Le uniche opzioni ufficiali per client che non redimono sono `--no-ccr`, `--lossless`, `--ccr-inline-resolve` (quest'ultimo solo response-path, altro problema). Alzare il cap = patchare il sorgente headroom nel venv = drift. Scartato.
+- Fix client (nostro codice, zero patch upstream):
+  - `llm.py`: `UnresolvedCCRRetrievalError` (con `tool_names`) sollevato SOLO quando `finish_reason == "tool_calls"` e TUTTE le call pendenti sono `headroom_retrieve`; altri casi restano `RuntimeError` generico.
+  - `service.py`: `_maybe_enrich_with_llm` al primo errore CCR ritenta UNA volta con evidenza metadata-only (`max_documents=0`, budget dimezzato); `_format_llm_evidence` accetta `evidence_char_budget` + `max_documents`; prompt ammorbidito (retrieval solo per un singolo fatto bloccante, max 1-2 blocchi).
+  - Perche' metadata-only funziona: i marker `<<ccr:>>` nascono dalle sezioni documento, e il proxy inietta `headroom_retrieve` SOLO se `scan_for_markers` trova contenuto compresso (`headroom/ccr/tool_injection.py`). Senza sezioni -> niente marker -> niente tool -> il modello risponde dal presente.
+  - Tentativi intermedi scartati dai dati live: retry con budget dimezzato ma top-2 docs -> ancora 3 call aperte (2 run). I marker scalano col NUMERO di item, non solo coi char.
+- Prova LIVE decisiva (`scripts/smoke_web_research_dgx.sh`, proxy CCR on): primo tentativo 10 call aperte -> `retrying once with metadata-only evidence` -> `LLM enrichment keys=['confidence', 'recommended_next_action', 'summary'] summary_chars=1187`; report JSON: `llm_enriched: True`, `llm_error: None`, summary grounded ("Based on 5 web sources..."). La request retry (`before=1654 after=1447`) e' piccola e quasi non compressa: giusto, e' gia' magra.
+- Test: 5 nuovi (errore tipizzato, caso non-CCR, retry-con-successo, retry-doppio-fail onesto, `max_documents`) -> suite `78 passed` (Windows + DGX).
 
 ## Prossimi step consigliati
 

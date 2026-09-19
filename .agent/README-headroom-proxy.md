@@ -32,7 +32,8 @@ the noisy web payload never enters its context.
 4. Keep **CCR on** (default) and let the proxy run the retrieval loop. Per upstream
    `wiki/ccr.md` "*The client never sees CCR tool calls — they're handled transparently*":
    the proxy injects `headroom_retrieve`, the model calls it, the proxy resolves it and
-   continues the turn. **Do not write a client-side retrieve loop.**
+   continues the turn. **Do not write a client-side retrieve loop** (the CCR store is
+   proxy-local; the client cannot redeem the calls itself).
 5. **Never force `response_format: json_object`.** Measured: with it set, the delegated model
    echoed the compressed table back instead of answering (`content` came back `null` on the
    wire, then a 2,539-char echo of the evidence). Ask for JSON in the prompt and parse
@@ -43,6 +44,17 @@ the noisy web payload never enters its context.
 7. The request timeout must exceed the compression latency: 120s with the proxy, not 45s.
 8. Restart the proxy after installing anything into the `headroom` venv. Kompress health is
    reconciled at startup.
+9. The proxy resolves at most **`ccr_max_retrieval_rounds` (default 3, `headroom/proxy/models.py:208`)**
+   continuation rounds per turn, and **no CLI flag, env var, or settings-registry key overrides it**
+   (only `no_ccr`, `lossless`, `ccr_inline_resolve` for the response path, `no_ccr_proactive_expansion`).
+   Past the cap the proxy hands the still-open `headroom_retrieve` calls back to the client, which
+   surfaces as `finish_reason='tool_calls'` with no text content. The client handles exactly this
+   shape: `UnresolvedCCRRetrievalError` (only when *every* pending call is `headroom_retrieve`) triggers
+   **one** retry with metadata-only evidence (`max_documents=0`, halved budget). Metadata carries no
+   document sections, so the proxy emits no `<<ccr:>>` markers, injects no tool
+   (`headroom/ccr/tool_injection.py` injects only when `scan_for_markers` finds compressed content),
+   and the model answers from what is present. Measured live: first attempt 10 open calls →
+   retry answered with a 1,187-char grounded summary (`llm_enriched=true`).
 
 ## Layout (DGX = `Z:` from the Windows host)
 

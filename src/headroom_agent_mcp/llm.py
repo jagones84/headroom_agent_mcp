@@ -9,6 +9,29 @@ import httpx
 
 from .config import HeadroomAgentConfig
 
+#: Tool injected by the Headroom proxy when CCR compression is active. The
+#: proxy resolves its calls server-side, but only for a bounded number of
+#: continuation rounds (`ccr_max_retrieval_rounds`, default 3 in
+#: `headroom/proxy/models.py` — no CLI flag or env var overrides it). Past the
+#: cap the proxy hands the still-open calls back to the client, which cannot
+#: redeem them: the local CCR store lives inside the proxy process.
+HEADROOM_RETRIEVE_TOOL = "headroom_retrieve"
+
+
+class UnresolvedCCRRetrievalError(RuntimeError):
+    """The proxied model stopped on `headroom_retrieve` calls the proxy left open.
+
+    Carries the requested tool names so the caller can retry with smaller
+    evidence instead of failing outright.
+    """
+
+    def __init__(self, tool_names: list[str | None], finish_reason: object) -> None:
+        self.tool_names = tool_names
+        super().__init__(
+            "LLM returned no text content "
+            f"(finish_reason={finish_reason!r}, tool_calls={tool_names})"
+        )
+
 
 def extract_json_object(content: str) -> dict[str, object]:
     """Parse the JSON object out of a chat completion body.
@@ -97,6 +120,12 @@ class OpenAICompatibleLLMClient:
                 (call.get("function") or {}).get("name") or call.get("name")
                 for call in (message.get("tool_calls") or [])
             ]
+            if (
+                choice.get("finish_reason") == "tool_calls"
+                and tool_names
+                and all(name == HEADROOM_RETRIEVE_TOOL for name in tool_names)
+            ):
+                raise UnresolvedCCRRetrievalError(tool_names, choice.get("finish_reason"))
             raise RuntimeError(
                 "LLM returned no text content "
                 f"(finish_reason={choice.get('finish_reason')!r}, tool_calls={tool_names})"

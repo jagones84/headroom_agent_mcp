@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import RequestDefaults
-from .llm import OpenAICompatibleLLMClient
+from .llm import OpenAICompatibleLLMClient, UnresolvedCCRRetrievalError
 from .models import (
     CandidateFile,
     CandidateSymbol,
@@ -613,39 +613,39 @@ class DiscoveryService:
         model_profile: str,
     ) -> DiscoveryResponse:
         payload = response.model_dump()
-        grounded_evidence = self._format_llm_evidence(response)
         response_language = self._language_instruction(request.response_language)
+        evidence_budget = self.llm_evidence_char_budget
         try:
-            llm_json = self.llm_client.complete_json(
-                model_profile,
-                system_prompt=(
-                    "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
-                    "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
-                    f"Respond in {response_language}. This output-language instruction overrides any language suggested by the objective, summary, or evidence. "
-                    'Return only a json object shaped like {"summary": "...", "recommended_next_action": "...", "confidence": "high|medium|low"}. '
-                    "The evidence is a JSON document whose evidence_items array holds one excerpt per item. "
-                    "Some excerpts may be shortened by a context compressor: if a retrieval tool is available, call it to restore a "
-                    "block you need, otherwise answer from what is present and lower confidence. Never describe compression, retrieval "
-                    "plumbing or truncation, and never ask the user to fetch anything."
-                ),
-                user_prompt=(
-                    f"Objective: {request.objective}\n"
-                    f"Type: {request.objective_type.value}\n"
-                    f"Existing summary: {response.summary}\n"
-                    f"Relevant findings: {response.relevant_findings}\n"
-                    f"Raw reads for parent: {response.raw_reads_needed_by_parent}\n"
-                    f"Evidence JSON:\n{grounded_evidence}\n"
-                ),
+            llm_json = self._enrich_with_evidence_budget(
+                request, response, model_profile, response_language, evidence_budget
             )
-        except Exception as exc:
+        except UnresolvedCCRRetrievalError as exc:
             print(
-                f"[headroom_agent_mcp] LLM enrichment failed for profile {model_profile}: {exc}",
+                f"[headroom_agent_mcp] LLM hit unresolved CCR retrieval "
+                f"({exc}); retrying once with metadata-only evidence",
                 file=sys.stderr,
             )
-            payload["llm_enriched"] = False
-            payload["llm_error"] = str(exc)
-            payload["llm_profile_used"] = model_profile
-            return DiscoveryResponse.model_validate(payload)
+            evidence_budget = max(1000, evidence_budget // 2)
+            # Metadata-only retry: document sections are what the proxy turns
+            # into <<ccr:>> markers, and markers are what make the proxy inject
+            # headroom_retrieve (headroom/ccr/tool_injection.py only injects
+            # when scan_for_markers finds compressed content). No markers means
+            # no tool to call, so the model must answer from what is present.
+            try:
+                llm_json = self._enrich_with_evidence_budget(
+                    request,
+                    response,
+                    model_profile,
+                    response_language,
+                    evidence_budget,
+                    max_documents=0,
+                )
+            except Exception as retry_exc:
+                return self._enrichment_failure(
+                    payload, model_profile, f"{retry_exc} (after one reduced-evidence retry)"
+                )
+        except Exception as exc:
+            return self._enrichment_failure(payload, model_profile, str(exc))
 
         for key in ("summary", "recommended_next_action", "confidence"):
             if isinstance(llm_json.get(key), str) and llm_json[key]:
@@ -660,7 +660,57 @@ class DiscoveryService:
         payload["llm_profile_used"] = model_profile
         return DiscoveryResponse.model_validate(payload)
 
-    def _format_llm_evidence(self, response: DiscoveryResponse) -> str:
+    def _enrichment_failure(
+        self, payload: dict[str, object], model_profile: str, error: str
+    ) -> DiscoveryResponse:
+        print(
+            f"[headroom_agent_mcp] LLM enrichment failed for profile {model_profile}: {error}",
+            file=sys.stderr,
+        )
+        payload["llm_enriched"] = False
+        payload["llm_error"] = error
+        payload["llm_profile_used"] = model_profile
+        return DiscoveryResponse.model_validate(payload)
+
+    def _enrich_with_evidence_budget(
+        self,
+        request: DiscoveryRequest,
+        response: DiscoveryResponse,
+        model_profile: str,
+        response_language: str,
+        evidence_budget: int,
+        max_documents: int | None = None,
+    ) -> dict[str, object]:
+        grounded_evidence = self._format_llm_evidence(response, evidence_budget, max_documents)
+        return self.llm_client.complete_json(
+            model_profile,
+            system_prompt=(
+                "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
+                "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
+                f"Respond in {response_language}. This output-language instruction overrides any language suggested by the objective, summary, or evidence. "
+                'Return only a json object shaped like {"summary": "...", "recommended_next_action": "...", "confidence": "high|medium|low"}. '
+                "The evidence is a JSON document whose evidence_items array holds one excerpt per item. "
+                "Some excerpts may be shortened by a context compressor: answer from what is present and lower "
+                "confidence when unsure; only call a retrieval tool when one specific missing fact blocks the answer, "
+                "and never for more than the one or two blocks you need most. Never describe compression, retrieval "
+                "plumbing or truncation, and never ask the user to fetch anything."
+            ),
+            user_prompt=(
+                f"Objective: {request.objective}\n"
+                f"Type: {request.objective_type.value}\n"
+                f"Existing summary: {response.summary}\n"
+                f"Relevant findings: {response.relevant_findings}\n"
+                f"Raw reads for parent: {response.raw_reads_needed_by_parent}\n"
+                f"Evidence JSON:\n{grounded_evidence}\n"
+            ),
+        )
+
+    def _format_llm_evidence(
+        self,
+        response: DiscoveryResponse,
+        evidence_char_budget: int | None = None,
+        max_documents: int | None = None,
+    ) -> str:
         """Build the grounded evidence payload handed to the LLM.
 
         The payload is structured JSON because that is the shape Headroom
@@ -670,7 +720,8 @@ class DiscoveryService:
         tokens while the same content as prose saves only ~4%. Each document is
         therefore emitted as one item per section instead of a single text blob.
         """
-        remaining = self.llm_evidence_char_budget
+        remaining = self.llm_evidence_char_budget if evidence_char_budget is None else evidence_char_budget
+        documents = self._llm_documents if max_documents is None else self._llm_documents[:max_documents]
         items: list[dict[str, object]] = []
         for item in response.candidate_files[:4]:
             items.append(
@@ -695,7 +746,7 @@ class DiscoveryService:
         for finding in response.relevant_findings[:8]:
             items.append({"kind": "finding", "text": finding})
 
-        for rank, document in enumerate(self._llm_documents, start=1):
+        for rank, document in enumerate(documents, start=1):
             if remaining <= 0:
                 break
             text = document.text[:remaining]
