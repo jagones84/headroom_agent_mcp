@@ -13,21 +13,18 @@ JSONL_FILE="$RUNTIME_DIR/proxy.jsonl"
 PID_FILE="$RUNTIME_DIR/proxy.pid"
 ACTION="${1:-status}"
 
-ENV_FILE="$RUNTIME_DIR/proxy.env"
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
+case "$ACTION" in
+  start-ccr|start-ccr-trace) FORCE_CCR=1 ;;
+  *) FORCE_CCR=0 ;;
+esac
 
 PROXY_LOG_FLAG=(--log-file "$JSONL_FILE")
-if [[ "${HEADROOM_PROXY_LOG_MESSAGES:-0}" == "1" ]]; then
+if [[ "${HEADROOM_PROXY_LOG_MESSAGES:-0}" == "1" || "$ACTION" == "start-ccr-trace" ]]; then
   PROXY_LOG_FLAG+=(--log-messages)
 fi
 
 PROXY_CCR_FLAG=()
-if [[ "${HEADROOM_PROXY_CCR:-0}" != "1" && "$ACTION" != "start-ccr" ]]; then
+if [[ "${HEADROOM_PROXY_CCR:-0}" != "1" && "$FORCE_CCR" != "1" ]]; then
   PROXY_CCR_FLAG=(--no-ccr)
 fi
 
@@ -50,7 +47,7 @@ health() {
 }
 
 case "$ACTION" in
-  start|start-ccr)
+  start|start-ccr|start-ccr-trace)
     if proxy_running && health; then
       echo "already_running pid=$(proxy_pid) url=http://$PROXY_HOST:$PROXY_PORT"
       exit 0
@@ -111,7 +108,7 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "usage: $0 {start|start-ccr|stop|status}" >&2
+    echo "usage: $0 {start|start-ccr|start-ccr-trace|stop|status}" >&2
     exit 2
     ;;
 esac
