@@ -1,6 +1,6 @@
 # headroom_agent_mcp
 
-MCP server overlay for `OpenClaw` that runs a **discovery subagent** behind an optional `Headroom` proxy.
+Read-only discovery MCP for `OpenClaw` and other agent hosts, with optional `Headroom`-proxied LLM enrichment.
 
 It is designed for the cases where Headroom actually helps:
 - large docs / README files
@@ -78,6 +78,28 @@ This repo does **not** reimplement Headroom compression logic.
 
 Instead, if you configure the subagent model to talk to a Headroom proxy, the subagent gets automatic compression on its own model traffic while it explores noisy inputs. That keeps the parent agent precise and uncompressed for final edits.
 
+## Quick Start
+
+1. Copy `.env.template` to `.env`
+2. Install the package in a Python 3.11+ environment
+3. Run the smoke check or wire the stdio launcher into your MCP host
+
+Windows:
+
+```bash
+python -m venv C:\Users\giova\.venvs\headroom_agent_mcp
+C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pip install -e Z:\Repositories\headroom_agent_mcp[dev]
+C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python Z:\Repositories\headroom_agent_mcp\scripts\headroom_agent_stdio_windows.py --check
+```
+
+Linux / DGX:
+
+```bash
+python3 -m venv ~/.venvs/headroom_agent_mcp
+~/.venvs/headroom_agent_mcp/bin/python -m pip install -e ~/Repositories/headroom_agent_mcp[dev]
+~/Repositories/headroom_agent_mcp/scripts/headroom_agent_stdio_unix.sh --check
+```
+
 ## Configuration
 
 Copy `.env.template` to `.env` or export the variables in your runtime:
@@ -110,6 +132,10 @@ LLM enrichment behavior:
 - if an LLM profile exists and the caller does not pass `model_profile`, the server falls back to the configured default profile
 - LLM failures are exposed in the response via `llm_error` and logged to `stderr` without corrupting the stdio MCP stream
 - zero-score candidates are now labeled as fallback candidates instead of claiming keyword overlap that did not happen
+
+Current retrieval behavior:
+- directory scans collect standard source/docs/log files by suffix
+- directory scans also collect common config files by name, including `.env`, `.env.template`, `Dockerfile`, `Makefile`, and `Procfile`
 
 Launchers:
 - Windows stable launcher: `scripts/headroom_agent_stdio_windows.py`

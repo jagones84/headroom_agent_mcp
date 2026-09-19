@@ -8,6 +8,12 @@ coverage.xml
 *.pyo
 *.pyd
 .env
+.env.*
+!.env.template
+.ruff_cache/
+.idea/
+.vscode/
+.DS_Store
 .agent/reports/
 scripts/*.log
 scripts/*.pid
