@@ -17,7 +17,10 @@ class LLMProfile(BaseModel):
 
     model: str
     base_url: str
-    api_key_env: str
+    api_key_env: str | None = None
+    require_api_key: bool = True
+    supports_json_response_format: bool = True
+    timeout_seconds: float = 45.0
     use_headroom_proxy: bool = False
 
 
@@ -56,6 +59,18 @@ class HeadroomAgentConfig(BaseModel):
             parsed[profile] = commands
         return parsed
 
+    @staticmethod
+    def _env_flag(name: str, default: bool) -> bool:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        normalized = raw_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
+
     @classmethod
     def from_sources(cls, config_path: str | Path | None = None) -> "HeadroomAgentConfig":
         config_file = Path(config_path) if config_path else Path("config/config.yaml")
@@ -67,11 +82,15 @@ class HeadroomAgentConfig(BaseModel):
         provider = os.getenv("HEADROOM_AGENT_MODEL_PROVIDER", "openrouter")
         model = os.getenv("HEADROOM_AGENT_MODEL_NAME", "deepseek/deepseek-v4-flash")
         base_url = os.getenv("HEADROOM_AGENT_BASE_URL", "https://openrouter.ai/api/v1")
-        api_key_env = "HEADROOM_AGENT_API_KEY"
+        api_key_env_raw = os.getenv("HEADROOM_AGENT_API_KEY_ENV", "HEADROOM_AGENT_API_KEY").strip()
+        api_key_env = api_key_env_raw or None
         profiles[provider] = LLMProfile(
             model=model,
             base_url=base_url,
             api_key_env=api_key_env,
+            require_api_key=cls._env_flag("HEADROOM_AGENT_REQUIRE_API_KEY", True),
+            supports_json_response_format=cls._env_flag("HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT", True),
+            timeout_seconds=float(os.getenv("HEADROOM_AGENT_TIMEOUT_SECONDS", "45")),
             use_headroom_proxy=bool(os.getenv("HEADROOM_PROXY_URL")),
         )
 

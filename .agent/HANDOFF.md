@@ -34,7 +34,7 @@
 
 ## Test e verifica
 
-- Suite TDD locale aggiornata dopo cross-platform hardening 2026-09-19: `22 passed`
+- Suite TDD locale aggiornata dopo grounding fix + LLM hardening 2026-09-19: `27 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
@@ -75,6 +75,12 @@
   - F5 fixato: default modello/documentazione allineati a `deepseek/deepseek-v4-flash`
   - F6 fixato in modo sostanziale: esclusi artefatti `.egg-info`, `dist`, `build`, `.pytest_cache`; scoring passato da sottostringhe grezze a tokenizzazione normalizzata
   - F8 fixato: `candidate_symbols` limitato ai file effettivamente esposti in `candidate_files`
+  - grounding fix aggiuntivo: l'LLM vede ora `candidate_files` + `candidate_symbols` + `small_snippets` + finding meccanici nel prompt, e non puo' piu' sovrascrivere `relevant_findings` con allucinazioni
+  - LLM hardening aggiuntivo:
+    - `api_key_env` ora puo' essere `null` per endpoint locali keyless
+    - `require_api_key` configurabile per profilo/env
+    - `supports_json_response_format` configurabile per provider OpenAI-compatible che rifiutano `response_format`
+    - `timeout_seconds` per profilo finalmente applicato davvero dal client HTTP
   - residui NON affrontati in questo passaggio:
     - qualità snippet (`F9`)
     - fixture test trattate come log reali (`F10`)

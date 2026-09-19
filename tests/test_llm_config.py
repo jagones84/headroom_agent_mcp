@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from headroom_agent_mcp.config import HeadroomAgentConfig, LLMProfile
 from headroom_agent_mcp.llm import OpenAICompatibleLLMClient
@@ -23,6 +24,57 @@ def test_llm_client_prefers_headroom_proxy_when_enabled() -> None:
     resolved = client.resolve_endpoint("openrouter")
 
     assert resolved == "http://127.0.0.1:8788/v1"
+
+
+def test_llm_client_allows_local_endpoint_without_api_key_when_profile_disables_auth() -> None:
+    config = HeadroomAgentConfig(
+        llm_profiles={
+            "local": LLMProfile(
+                model="local-model",
+                base_url="http://127.0.0.1:8000/v1",
+                api_key_env=None,
+                require_api_key=False,
+                supports_json_response_format=False,
+            )
+        }
+    )
+    client = OpenAICompatibleLLMClient(config=config)
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": "{\"summary\":\"ok\"}"}}]}
+
+    with patch("headroom_agent_mcp.llm.httpx.post", return_value=response) as post_mock:
+        result = client.complete_json("local", system_prompt="sys", user_prompt="usr")
+
+    assert result["summary"] == "ok"
+    kwargs = post_mock.call_args.kwargs
+    assert "Authorization" not in kwargs["headers"]
+    assert "response_format" not in kwargs["json"]
+
+
+def test_config_from_sources_can_disable_auth_and_json_response_format(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "llm_profiles:\n"
+        "  local:\n"
+        "    model: local-model\n"
+        "    base_url: http://127.0.0.1:8000/v1\n"
+        "    api_key_env: null\n"
+        "    require_api_key: false\n"
+        "    supports_json_response_format: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HEADROOM_AGENT_MODEL_PROVIDER", "local")
+    monkeypatch.setenv("HEADROOM_AGENT_MODEL_NAME", "local-model")
+    monkeypatch.setenv("HEADROOM_AGENT_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("HEADROOM_AGENT_REQUIRE_API_KEY", "false")
+    monkeypatch.setenv("HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT", "false")
+
+    config = HeadroomAgentConfig.from_sources(config_path)
+
+    assert config.default_model_profile == "local"
+    assert config.llm_profiles["local"].require_api_key is False
+    assert config.llm_profiles["local"].supports_json_response_format is False
 
 
 class _FakeLLMClient:

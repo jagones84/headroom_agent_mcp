@@ -86,10 +86,20 @@ Copy `.env.template` to `.env` or export the variables in your runtime:
 - `HEADROOM_AGENT_MODEL_PROVIDER`
 - `HEADROOM_AGENT_MODEL_NAME`
 - `HEADROOM_AGENT_BASE_URL`
+- `HEADROOM_AGENT_API_KEY_ENV` (optional alternate env var name for auth)
 - `HEADROOM_AGENT_API_KEY`
+- `HEADROOM_AGENT_REQUIRE_API_KEY` (`true` by default; set `false` for local keyless endpoints)
+- `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT` (`true` by default; set `false` for OpenAI-compatible servers that reject `response_format`)
 - `HEADROOM_PROXY_URL` (optional)
+- `HEADROOM_AGENT_TIMEOUT_SECONDS`
 
 If `HEADROOM_PROXY_URL` is set, the configured LLM profile can route through it.
+
+For local OpenAI-compatible endpoints:
+- point `HEADROOM_AGENT_BASE_URL` to your local `/v1` server
+- set `HEADROOM_AGENT_REQUIRE_API_KEY=false` if the server is keyless
+- set `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT=false` if the server does not support JSON response formatting
+- optionally set `HEADROOM_AGENT_API_KEY_ENV` to a different variable name if the server still wants auth
 
 `config/config.yaml` is live:
 - `defaults` are applied when the caller omits optional request fields like `max_files`, `max_commands`, `raw_read_budget`, `return_snippets`, and `command_allowlist_profile`
