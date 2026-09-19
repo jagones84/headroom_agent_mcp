@@ -77,6 +77,7 @@
   - F6 chiuso meglio nel passaggio finale: i candidati con `score=0` non dichiarano piu' falso "keyword overlap", ma vengono marcati come fallback espliciti
   - F8 fixato: `candidate_symbols` limitato ai file effettivamente esposti in `candidate_files`
   - F17 chiuso: le scansioni di directory raccolgono ora anche file di configurazione senza suffisso standard come `.env`, `.env.template`, `Dockerfile`, `Makefile`, `Procfile`
+  - F18 chiuso: `terminal_commands` vengono ora eseguiti con la stessa policy anche in `codebase_discovery` e `docs_research`; non spariscono piu' in `commands_run`
   - grounding fix aggiuntivo: l'LLM vede ora `candidate_files` + `candidate_symbols` + `small_snippets` + finding meccanici nel prompt, e non puo' piu' sovrascrivere `relevant_findings` con allucinazioni
   - LLM hardening aggiuntivo:
     - `api_key_env` ora puo' essere `null` per endpoint locali keyless
@@ -88,6 +89,7 @@
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)
     - esercizio automatico del proxy Headroom nel wrapper DGX (`F13`)
+  - suite locale dopo F18: `31 passed`
 
 ## Prossimi step consigliati
 

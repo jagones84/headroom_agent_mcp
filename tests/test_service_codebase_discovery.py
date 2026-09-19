@@ -124,3 +124,30 @@ def test_codebase_discovery_marks_zero_score_candidates_as_fallbacks(tmp_path: P
     assert all(item.score == 0 for item in response.candidate_files)
     assert all("overlap" not in item.reason.lower() for item in response.candidate_files)
     assert all("fallback" in item.reason.lower() or "no keyword match" in item.reason.lower() for item in response.candidate_files)
+
+
+def test_codebase_discovery_runs_terminal_commands_and_surfaces_blocked_results(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "service.py").write_text("def resolve_service() -> str:\n    return 'ok'\n", encoding="utf-8")
+    outside_path = tmp_path.parent / "outside.txt"
+    outside_path.write_text("secret\n", encoding="utf-8")
+    request = DiscoveryRequest(
+        objective="Find the service implementation",
+        objective_type=ObjectiveType.CODEBASE_DISCOVERY,
+        scope_paths=[str(tmp_path)],
+        query_hints=["service"],
+        terminal_commands=[["git", "status"], ["cat", str(outside_path)]],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_TERMINAL,
+        max_files=2,
+        max_commands=2,
+        raw_read_budget=2,
+    )
+
+    response = DiscoveryService().run(request)
+
+    assert len(response.commands_run) == 2
+    assert response.commands_run[0].command == ["git", "status"]
+    assert response.commands_run[0].blocked is False
+    assert response.commands_run[1].command == ["cat", str(outside_path)]
+    assert response.commands_run[1].blocked is True

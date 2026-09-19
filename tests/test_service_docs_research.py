@@ -53,3 +53,25 @@ def test_docs_research_collects_env_template_when_scanning_directory(tmp_path: P
 
     candidate_paths = [Path(item.path).name for item in response.candidate_files]
     assert ".env.template" in candidate_paths
+
+
+def test_docs_research_runs_terminal_commands(tmp_path: Path) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text("# Guide\nUse MCP_ENDPOINT to configure the host.\n", encoding="utf-8")
+    request = DiscoveryRequest(
+        objective="Find the configuration commands and environment variables",
+        objective_type=ObjectiveType.DOCS_RESEARCH,
+        scope_paths=[str(tmp_path)],
+        query_hints=["MCP_ENDPOINT", "configuration"],
+        terminal_commands=[["git", "status"]],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_TERMINAL,
+        max_files=2,
+        max_commands=1,
+        raw_read_budget=2,
+    )
+
+    response = DiscoveryService().run(request)
+
+    assert len(response.commands_run) == 1
+    assert response.commands_run[0].command == ["git", "status"]
+    assert response.commands_run[0].blocked is False

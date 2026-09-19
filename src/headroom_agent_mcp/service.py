@@ -99,6 +99,7 @@ class DiscoveryService:
         return DiscoveryRequest.model_validate(payload)
 
     def _run_codebase_discovery(self, request: DiscoveryRequest) -> DiscoveryResponse:
+        command_results = self._run_terminal_commands(request)
         documents = self._collect_documents(request)
         candidate_documents = documents[: request.max_files]
         candidate_files = [
@@ -123,7 +124,7 @@ class DiscoveryService:
             candidate_files=candidate_files,
             candidate_symbols=candidate_symbols,
             small_snippets=snippets if request.return_snippets else [],
-            commands_run=[],
+            commands_run=command_results,
             raw_reads_needed_by_parent=raw_reads,
             uncertainties=[
                 "This tool narrows the search space but does not replace raw file reads for final edits.",
@@ -135,13 +136,7 @@ class DiscoveryService:
         )
 
     def _run_logs_triage(self, request: DiscoveryRequest) -> DiscoveryResponse:
-        command_results = run_allowed_commands(
-            request.terminal_commands,
-            request.command_allowlist_profile,
-            cwd=self._first_real_path(request.scope_paths),
-            max_commands=request.max_commands,
-            allowed_commands=self.command_profiles.get(request.command_allowlist_profile),
-        )
+        command_results = self._run_terminal_commands(request)
         documents = self._collect_documents(request)
         findings = self._extract_error_findings(documents, command_results, request.query_hints)
         candidate_files = [
@@ -175,6 +170,7 @@ class DiscoveryService:
         )
 
     def _run_docs_research(self, request: DiscoveryRequest) -> DiscoveryResponse:
+        command_results = self._run_terminal_commands(request)
         documents = self._collect_documents(request)
         candidate_files = [
             CandidateFile(
@@ -194,7 +190,7 @@ class DiscoveryService:
             candidate_files=candidate_files,
             candidate_symbols=[],
             small_snippets=snippets if request.return_snippets else [],
-            commands_run=[],
+            commands_run=command_results,
             raw_reads_needed_by_parent=raw_reads,
             uncertainties=["External docs and local docs may diverge; validate against the source of truth."],
             recommended_next_action="Open the top raw doc candidates and cite the exact sections you will rely on.",
@@ -391,6 +387,15 @@ class DiscoveryService:
             path = Path(scope)
             return path if path.is_dir() else path.parent
         return None
+
+    def _run_terminal_commands(self, request: DiscoveryRequest):
+        return run_allowed_commands(
+            request.terminal_commands,
+            request.command_allowlist_profile,
+            cwd=self._first_real_path(request.scope_paths),
+            max_commands=request.max_commands,
+            allowed_commands=self.command_profiles.get(request.command_allowlist_profile),
+        )
 
     def _maybe_enrich_with_llm(
         self,
