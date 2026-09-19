@@ -1,8 +1,10 @@
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from headroom_agent_mcp.config import HeadroomAgentConfig, LLMProfile
-from headroom_agent_mcp.llm import OpenAICompatibleLLMClient
+from headroom_agent_mcp.llm import OpenAICompatibleLLMClient, extract_json_object
 from headroom_agent_mcp.models import CommandAllowlistProfile, DiscoveryRequest, ObjectiveType
 from headroom_agent_mcp.service import DiscoveryService
 
@@ -233,3 +235,73 @@ def test_config_from_sources_loads_yaml_defaults_profiles_and_slug_model(tmp_pat
         ["git", "status"],
         ["git", "diff", "--name-only"],
     ]
+
+
+def test_extract_json_object_strips_markdown_fence() -> None:
+    fenced = '```json\n{"summary": "fenced answer", "confidence": "high"}\n```'
+
+    assert extract_json_object(fenced)["summary"] == "fenced answer"
+
+
+def test_extract_json_object_ignores_surrounding_prose() -> None:
+    body = 'Here is the result:\n{"summary": "inner", "confidence": "low"}\nHope that helps.'
+
+    assert extract_json_object(body)["summary"] == "inner"
+
+
+def test_extract_json_object_rejects_non_object_payloads() -> None:
+    with pytest.raises(ValueError):
+        extract_json_object("[1, 2, 3]")
+
+
+def test_llm_client_sends_max_tokens_and_omits_response_format_by_default() -> None:
+    config = HeadroomAgentConfig(
+        headroom_proxy_url="http://127.0.0.1:8788",
+        llm_profiles={
+            "openrouter": LLMProfile(
+                model="deepseek/deepseek-v4-flash",
+                base_url="https://openrouter.ai/api/v1",
+                api_key_env=None,
+                require_api_key=False,
+                use_headroom_proxy=True,
+            )
+        },
+    )
+    client = OpenAICompatibleLLMClient(config=config)
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": '```json\n{"summary": "ok"}\n```'}}]}
+
+    with patch("headroom_agent_mcp.llm.httpx.post", return_value=response) as post_mock:
+        result = client.complete_json("openrouter", system_prompt="sys", user_prompt="usr")
+
+    assert result["summary"] == "ok"
+    payload = post_mock.call_args.kwargs["json"]
+    assert payload["max_tokens"] == 2048
+    assert "response_format" not in payload
+
+
+def test_llm_client_keeps_response_format_when_profile_opts_in() -> None:
+    config = HeadroomAgentConfig(
+        llm_profiles={
+            "local": LLMProfile(
+                model="local-model",
+                base_url="http://127.0.0.1:8000/v1",
+                api_key_env=None,
+                require_api_key=False,
+                supports_json_response_format=True,
+                max_tokens=512,
+            )
+        }
+    )
+    client = OpenAICompatibleLLMClient(config=config)
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": "{\"summary\": \"ok\"}"}}]}
+
+    with patch("headroom_agent_mcp.llm.httpx.post", return_value=response) as post_mock:
+        client.complete_json("local", system_prompt="sys", user_prompt="usr")
+
+    payload = post_mock.call_args.kwargs["json"]
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["max_tokens"] == 512

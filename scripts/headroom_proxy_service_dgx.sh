@@ -6,15 +6,30 @@ PROXY_HOST="${HEADROOM_PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${HEADROOM_PROXY_PORT:-8788}"
 PROXY_MODE="${HEADROOM_PROXY_MODE:-token}"
 PROXY_TARGET_RATIO="${HEADROOM_PROXY_TARGET_RATIO:-0.5}"
-PROXY_CCR_FLAG=()
-if [[ "${HEADROOM_PROXY_CCR:-0}" != "1" ]]; then
-  PROXY_CCR_FLAG=(--no-ccr)
-fi
 BACKEND="${HEADROOM_PROXY_BACKEND:-openrouter}"
 RUNTIME_DIR="$HOME/.headroom"
 LOG_FILE="$RUNTIME_DIR/proxy.log"
+JSONL_FILE="$RUNTIME_DIR/proxy.jsonl"
 PID_FILE="$RUNTIME_DIR/proxy.pid"
 ACTION="${1:-status}"
+
+ENV_FILE="$RUNTIME_DIR/proxy.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
+PROXY_LOG_FLAG=(--log-file "$JSONL_FILE")
+if [[ "${HEADROOM_PROXY_LOG_MESSAGES:-0}" == "1" ]]; then
+  PROXY_LOG_FLAG+=(--log-messages)
+fi
+
+PROXY_CCR_FLAG=()
+if [[ "${HEADROOM_PROXY_CCR:-0}" != "1" && "$ACTION" != "start-ccr" ]]; then
+  PROXY_CCR_FLAG=(--no-ccr)
+fi
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -35,7 +50,7 @@ health() {
 }
 
 case "$ACTION" in
-  start)
+  start|start-ccr)
     if proxy_running && health; then
       echo "already_running pid=$(proxy_pid) url=http://$PROXY_HOST:$PROXY_PORT"
       exit 0
@@ -58,11 +73,17 @@ case "$ACTION" in
       --host "$PROXY_HOST" \
       --port "$PROXY_PORT" \
       "${PROXY_CCR_FLAG[@]}" \
+      "${PROXY_LOG_FLAG[@]}" \
       >>"$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
+    if [[ ${#PROXY_CCR_FLAG[@]} -eq 0 ]]; then
+      CCR_STATE="on"
+    else
+      CCR_STATE="off"
+    fi
     for _ in $(seq 1 60); do
       if health; then
-        echo "started pid=$(cat "$PID_FILE") url=http://$PROXY_HOST:$PROXY_PORT mode=$PROXY_MODE target_ratio=$PROXY_TARGET_RATIO ccr=${HEADROOM_PROXY_CCR:-0}"
+        echo "started pid=$(cat "$PID_FILE") url=http://$PROXY_HOST:$PROXY_PORT mode=$PROXY_MODE target_ratio=$PROXY_TARGET_RATIO ccr=$CCR_STATE"
         exit 0
       fi
       sleep 1
@@ -90,7 +111,7 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "usage: $0 {start|stop|status}" >&2
+    echo "usage: $0 {start|start-ccr|stop|status}" >&2
     exit 2
     ;;
 esac

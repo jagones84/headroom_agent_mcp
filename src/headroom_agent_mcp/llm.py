@@ -10,6 +10,41 @@ import httpx
 from .config import HeadroomAgentConfig
 
 
+def extract_json_object(content: str) -> dict[str, object]:
+    """Parse the JSON object out of a chat completion body.
+
+    Models frequently wrap the object in a markdown fence or add prose around it,
+    so the first object is extracted instead of requiring the body to be pure JSON.
+    This keeps the caller working without a forced `response_format`.
+
+    Sources:
+    - https://api-docs.deepseek.com/guides/json_mode (JSON Output: the model is
+      told to emit JSON through the prompt, so the body still needs parsing)
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("LLM response carried no text content")
+    text = content.strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end <= start:
+            raise
+        parsed = json.loads(text[start : end + 1])
+
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM response is not a JSON object")
+    return parsed
+
+
 class OpenAICompatibleLLMClient:
     """Thin helper around chat-completions style endpoints."""
 
@@ -38,6 +73,7 @@ class OpenAICompatibleLLMClient:
         payload = {
             "model": profile.model,
             "temperature": 0,
+            "max_tokens": profile.max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -52,5 +88,17 @@ class OpenAICompatibleLLMClient:
             timeout=profile.timeout_seconds,
         )
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        return json.loads(content)
+        body = response.json()
+        choice = (body.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            tool_names = [
+                (call.get("function") or {}).get("name") or call.get("name")
+                for call in (message.get("tool_calls") or [])
+            ]
+            raise RuntimeError(
+                "LLM returned no text content "
+                f"(finish_reason={choice.get('finish_reason')!r}, tool_calls={tool_names})"
+            )
+        return extract_json_object(content)

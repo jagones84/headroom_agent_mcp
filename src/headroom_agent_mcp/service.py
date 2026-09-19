@@ -622,11 +622,11 @@ class DiscoveryService:
                     "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
                     "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
                     f"Respond in {response_language}. This output-language instruction overrides any language suggested by the objective, summary, or evidence. "
-                    "Return JSON with optional keys: summary, recommended_next_action, confidence. "
+                    'Return only a json object shaped like {"summary": "...", "recommended_next_action": "...", "confidence": "high|medium|low"}. '
                     "The evidence is a JSON document whose evidence_items array holds one excerpt per item. "
-                    "Some excerpts may be shortened by a context compressor: never mention compression, retrieval, "
-                    "truncation, or missing detail, and never ask to fetch or retrieve more. Synthesize only what the "
-                    "excerpts do state; lower confidence instead of narrating the gap."
+                    "Some excerpts may be shortened by a context compressor: if a retrieval tool is available, call it to restore a "
+                    "block you need, otherwise answer from what is present and lower confidence. Never describe compression, retrieval "
+                    "plumbing or truncation, and never ask the user to fetch anything."
                 ),
                 user_prompt=(
                     f"Objective: {request.objective}\n"

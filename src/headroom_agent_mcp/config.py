@@ -19,8 +19,9 @@ class LLMProfile(BaseModel):
     base_url: str
     api_key_env: str | None = None
     require_api_key: bool = True
-    supports_json_response_format: bool = True
+    supports_json_response_format: bool = False
     timeout_seconds: float = 45.0
+    max_tokens: int = 2048
     use_headroom_proxy: bool = False
 
 
@@ -93,8 +94,9 @@ class HeadroomAgentConfig(BaseModel):
             base_url=base_url,
             api_key_env=api_key_env,
             require_api_key=cls._env_flag("HEADROOM_AGENT_REQUIRE_API_KEY", True),
-            supports_json_response_format=cls._env_flag("HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT", True),
+            supports_json_response_format=cls._env_flag("HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT", False),
             timeout_seconds=float(os.getenv("HEADROOM_AGENT_TIMEOUT_SECONDS", default_timeout)),
+            max_tokens=int(os.getenv("HEADROOM_AGENT_MAX_TOKENS", "2048")),
             use_headroom_proxy=bool(proxy_url),
         )
 
