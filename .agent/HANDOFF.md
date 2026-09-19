@@ -84,12 +84,12 @@
     - `require_api_key` configurabile per profilo/env
     - `supports_json_response_format` configurabile per provider OpenAI-compatible che rifiutano `response_format`
     - `timeout_seconds` per profilo finalmente applicato davvero dal client HTTP
+  - F9 migliorato: `small_snippets` non si fermano piu' alla prima occorrenza nel file; ora espongono piu' regioni rilevanti dello stesso file (utile sui file multi-`except`)
   - residui NON affrontati in questo passaggio:
-    - qualità snippet (`F9`)
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)
     - esercizio automatico del proxy Headroom nel wrapper DGX (`F13`)
-  - suite locale dopo F18: `31 passed`
+  - suite locale dopo fix multi-match snippets: `32 passed`
 
 ## Prossimi step consigliati
 

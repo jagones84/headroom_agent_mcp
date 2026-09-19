@@ -151,3 +151,36 @@ def test_codebase_discovery_runs_terminal_commands_and_surfaces_blocked_results(
     assert response.commands_run[0].blocked is False
     assert response.commands_run[1].command == ["cat", str(outside_path)]
     assert response.commands_run[1].blocked is True
+
+
+def test_codebase_discovery_snippets_cover_multiple_matching_regions_in_same_file(tmp_path: Path) -> None:
+    target = tmp_path / "service.py"
+    target.write_text(
+        "def read_config() -> str:\n"
+        "    try:\n"
+        "        return load()\n"
+        "    except OSError:\n"
+        "        return 'missing'\n"
+        "\n"
+        "def parse_payload() -> str:\n"
+        "    try:\n"
+        "        return parse()\n"
+        "    except ValueError:\n"
+        "        return 'bad'\n",
+        encoding="utf-8",
+    )
+    request = DiscoveryRequest(
+        objective="Find which exceptions are handled in service parsing",
+        objective_type=ObjectiveType.CODEBASE_DISCOVERY,
+        scope_paths=[str(tmp_path)],
+        query_hints=["except", "OSError", "ValueError"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=4,
+    )
+
+    response = DiscoveryService().run(request)
+
+    combined_snippets = "\n".join(snippet.snippet for snippet in response.small_snippets if snippet.path.endswith("service.py"))
+    assert "except OSError" in combined_snippets
+    assert "except ValueError" in combined_snippets

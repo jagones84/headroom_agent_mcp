@@ -315,25 +315,37 @@ class DiscoveryService:
     def _build_snippets(self, documents: list[EvidenceDocument], request: DiscoveryRequest) -> list[SmallSnippet]:
         snippets: list[SmallSnippet] = []
         terms = self._search_terms(request)
+        snippet_limit = min(max(request.raw_read_budget * 2, 1), 8)
         for doc in documents[: request.raw_read_budget]:
+            if len(snippets) >= snippet_limit:
+                break
             lines = doc.text.splitlines()
-            matched_index = 0
-            for index, line in enumerate(lines):
-                lower = line.lower()
-                if any(term in lower for term in terms):
-                    matched_index = index
-                    break
-            start = max(matched_index - 2, 0)
-            end = min(matched_index + 3, len(lines))
-            snippet = "\n".join(lines[start:end])[: self.request_defaults.max_snippet_chars]
-            if snippet.strip():
+            matched_indices = [
+                index
+                for index, line in enumerate(lines)
+                if any(term in line.lower() for term in terms)
+            ] or [0]
+            covered_until = -1
+            snippets_for_doc = 0
+            for matched_index in matched_indices:
+                start = max(matched_index - 2, 0)
+                end = min(matched_index + 3, len(lines))
+                if start <= covered_until:
+                    continue
+                snippet = "\n".join(lines[start:end])[: self.request_defaults.max_snippet_chars]
+                if not snippet.strip():
+                    continue
                 snippets.append(
                     SmallSnippet(
                         path=doc.path,
                         snippet=snippet,
-                        reason="Small raw excerpt around the first relevant match.",
+                        reason="Small raw excerpt around a relevant match.",
                     )
                 )
+                covered_until = end
+                snippets_for_doc += 1
+                if len(snippets) >= snippet_limit or snippets_for_doc >= 3:
+                    break
         return snippets
 
     def _build_grounded_doc_findings(
