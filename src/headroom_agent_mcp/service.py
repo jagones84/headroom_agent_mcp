@@ -135,7 +135,7 @@ class DiscoveryService:
             allowed_commands=self.command_profiles.get(request.command_allowlist_profile),
         )
         documents = self._collect_documents(request)
-        findings = self._extract_error_findings(documents, command_results)
+        findings = self._extract_error_findings(documents, command_results, request.query_hints)
         candidate_files = [
             CandidateFile(path=doc.path, reason="Contains log/error evidence", score=round(doc.score, 2))
             for doc in documents[: request.max_files]
@@ -168,10 +168,8 @@ class DiscoveryService:
             CandidateFile(path=doc.path, reason="Relevant documentation hit", score=round(doc.score, 2))
             for doc in documents[: request.max_files]
         ]
-        findings = []
-        for doc in documents[: min(4, len(documents))]:
-            heading = next((line.strip("# ").strip() for line in doc.text.splitlines() if line.startswith("#")), "")
-            findings.append(f"{Path(doc.path).name}: {heading or 'top document candidate'}")
+        snippets = self._build_snippets(documents, request)
+        findings = self._build_grounded_doc_findings(documents, snippets)
         raw_reads = [item.path for item in candidate_files[: request.raw_read_budget]]
         return DiscoveryResponse(
             summary=f"Collected {len(candidate_files)} documentation candidates for '{request.objective}'.",
@@ -179,7 +177,7 @@ class DiscoveryService:
             relevant_findings=findings or ["No documentation candidates found in scope."],
             candidate_files=candidate_files,
             candidate_symbols=[],
-            small_snippets=self._build_snippets(documents, request) if request.return_snippets else [],
+            small_snippets=snippets if request.return_snippets else [],
             commands_run=[],
             raw_reads_needed_by_parent=raw_reads,
             uncertainties=["External docs and local docs may diverge; validate against the source of truth."],
@@ -310,18 +308,45 @@ class DiscoveryService:
                 )
         return snippets
 
-    def _extract_error_findings(self, documents: list[EvidenceDocument], command_results) -> list[str]:
+    def _build_grounded_doc_findings(
+        self,
+        documents: list[EvidenceDocument],
+        snippets: list[SmallSnippet],
+    ) -> list[str]:
         findings: list[str] = []
+        snippet_by_path = {snippet.path: snippet.snippet for snippet in snippets}
+        for doc in documents[: min(4, len(documents))]:
+            snippet = snippet_by_path.get(doc.path, "").strip()
+            if snippet:
+                snippet_lines = [line.strip() for line in snippet.splitlines() if line.strip()]
+                first_line = next((line for line in snippet_lines if not line.startswith("#")), "")
+                if not first_line:
+                    first_line = snippet_lines[0] if snippet_lines else ""
+                findings.append(f"{Path(doc.path).name}: {first_line}")
+                continue
+            heading = next((line.strip("# ").strip() for line in doc.text.splitlines() if line.startswith("#")), "")
+            findings.append(f"{Path(doc.path).name}: {heading or 'top document candidate'}")
+        return findings
+
+    def _extract_error_findings(self, documents: list[EvidenceDocument], command_results, query_hints: list[str]) -> list[str]:
+        findings: list[str] = []
+        hint_terms = [hint.lower() for hint in query_hints if hint.strip()]
         for doc in documents:
             for line in doc.text.splitlines():
-                if re.search(r"(error|exception|traceback|fail|timeout)", line, re.IGNORECASE):
+                lower = line.lower()
+                if re.search(r"(error|exception|traceback|fail|timeout)", line, re.IGNORECASE) or (
+                    hint_terms and any(term in lower for term in hint_terms)
+                ):
                     findings.append(f"{Path(doc.path).name}: {line.strip()}")
                     if len(findings) >= 8:
                         return findings
         for result in command_results:
             combined = "\n".join(filter(None, [result.stdout, result.stderr]))
             for line in combined.splitlines():
-                if re.search(r"(error|exception|traceback|fail|timeout)", line, re.IGNORECASE):
+                lower = line.lower()
+                if re.search(r"(error|exception|traceback|fail|timeout)", line, re.IGNORECASE) or (
+                    hint_terms and any(term in lower for term in hint_terms)
+                ):
                     findings.append(f"{' '.join(result.command)}: {line.strip()}")
                     if len(findings) >= 8:
                         return findings
@@ -342,12 +367,14 @@ class DiscoveryService:
         model_profile: str,
     ) -> DiscoveryResponse:
         payload = response.model_dump()
+        grounded_evidence = self._format_llm_evidence(response)
         try:
             llm_json = self.llm_client.complete_json(
                 model_profile,
                 system_prompt=(
                     "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
-                    "Return JSON with optional keys: summary, relevant_findings, recommended_next_action, confidence."
+                    "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
+                    "Return JSON with optional keys: summary, recommended_next_action, confidence."
                 ),
                 user_prompt=(
                     f"Objective: {request.objective}\n"
@@ -355,6 +382,7 @@ class DiscoveryService:
                     f"Existing summary: {response.summary}\n"
                     f"Relevant findings: {response.relevant_findings}\n"
                     f"Raw reads for parent: {response.raw_reads_needed_by_parent}\n"
+                    f"Grounded evidence:\n{grounded_evidence}\n"
                 ),
             )
         except Exception as exc:
@@ -370,9 +398,21 @@ class DiscoveryService:
         for key in ("summary", "recommended_next_action", "confidence"):
             if isinstance(llm_json.get(key), str) and llm_json[key]:
                 payload[key] = llm_json[key]
-        if isinstance(llm_json.get("relevant_findings"), list) and llm_json["relevant_findings"]:
-            payload["relevant_findings"] = [str(item) for item in llm_json["relevant_findings"]]
         payload["llm_enriched"] = True
         payload["llm_error"] = None
         payload["llm_profile_used"] = model_profile
         return DiscoveryResponse.model_validate(payload)
+
+    def _format_llm_evidence(self, response: DiscoveryResponse) -> str:
+        evidence_lines: list[str] = []
+        for item in response.candidate_files[:4]:
+            evidence_lines.append(f"FILE {item.path} | score={item.score} | reason={item.reason}")
+        for symbol in response.candidate_symbols[:8]:
+            evidence_lines.append(f"SYMBOL {symbol.path}::{symbol.symbol} | kind={symbol.kind}")
+        for snippet in response.small_snippets[:6]:
+            evidence_lines.append(f"SNIPPET {snippet.path}:\n{snippet.snippet}")
+        for finding in response.relevant_findings[:8]:
+            evidence_lines.append(f"FINDING {finding}")
+        if not evidence_lines:
+            return "(no grounded evidence collected)"
+        return "\n---\n".join(evidence_lines)

@@ -30,9 +30,13 @@ class _FakeLLMClient:
         self.payload = payload or {"summary": "LLM enriched summary", "confidence": "high"}
         self.error = error
         self.calls: list[str] = []
+        self.user_prompts: list[str] = []
+        self.system_prompts: list[str] = []
 
     def complete_json(self, profile_name: str, *, system_prompt: str, user_prompt: str) -> dict[str, object]:
         self.calls.append(profile_name)
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
         if self.error:
             raise self.error
         return self.payload
@@ -76,6 +80,41 @@ def test_service_surfaces_llm_errors_instead_of_silencing_them(tmp_path: Path) -
 
     assert response.llm_enriched is False
     assert response.llm_error == "missing profile key"
+
+
+def test_service_passes_grounded_evidence_to_llm_and_keeps_mechanical_findings(tmp_path: Path) -> None:
+    target = tmp_path / "terminal.py"
+    target.write_text(
+        "def run_allowed_commands() -> None:\n"
+        "    try:\n"
+        "        pass\n"
+        "    except CalledProcessError:\n"
+        "        raise\n",
+        encoding="utf-8",
+    )
+    llm_client = _FakeLLMClient(
+        payload={
+            "summary": "LLM grounded summary",
+            "confidence": "high",
+            "relevant_findings": ["invented file src/index.ts"],
+        }
+    )
+    service = DiscoveryService(llm_client=llm_client, default_model_profile="openrouter")
+    request = DiscoveryRequest(
+        objective="Find subprocess error handling in terminal policy",
+        objective_type=ObjectiveType.CODEBASE_DISCOVERY,
+        scope_paths=[str(tmp_path)],
+        query_hints=["CalledProcessError", "terminal"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+    )
+
+    response = service.run(request)
+
+    assert llm_client.calls == ["openrouter"]
+    assert "CalledProcessError" in llm_client.user_prompts[0]
+    assert "terminal.py" in llm_client.user_prompts[0]
+    assert "invented file src/index.ts" not in response.relevant_findings
+    assert any("terminal.py" in finding for finding in response.relevant_findings)
 
 
 def test_config_from_sources_loads_yaml_defaults_profiles_and_slug_model(tmp_path: Path) -> None:

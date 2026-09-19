@@ -54,3 +54,26 @@ def test_logs_triage_uses_configured_command_profile_to_block_non_listed_command
     assert response.commands_run
     assert response.commands_run[0].blocked is True
     assert "active profile configuration" in response.commands_run[0].stderr.lower()
+
+
+def test_logs_triage_uses_query_hints_for_warning_only_logs(tmp_path: Path) -> None:
+    log_file = tmp_path / "warnings.log"
+    log_file.write_text(
+        "[INFO] boot ok\n"
+        "[WARNING] PyTorch was not found\n"
+        "[WARN] fallback to cpu mode\n",
+        encoding="utf-8",
+    )
+    request = DiscoveryRequest(
+        objective="Explain warning-only startup degradation",
+        objective_type=ObjectiveType.LOGS_TRIAGE,
+        scope_paths=[str(log_file)],
+        query_hints=["warning", "warn", "not found"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=2,
+    )
+
+    response = DiscoveryService().run(request)
+
+    assert any("pytorch was not found" in finding.lower() for finding in response.relevant_findings)
