@@ -85,11 +85,13 @@
     - `supports_json_response_format` configurabile per provider OpenAI-compatible che rifiutano `response_format`
     - `timeout_seconds` per profilo finalmente applicato davvero dal client HTTP
   - F9 migliorato: `small_snippets` non si fermano piu' alla prima occorrenza nel file; ora espongono piu' regioni rilevanti dello stesso file (utile sui file multi-`except`)
+  - F9 migliorato ancora: la fusione degli snippet salta solo le finestre interamente coperte (`end <= covered_until`) e il cap per file sale fino a 5 snippet; il caso denso da 5 `except` resta coperto
+  - lingua output LLM irrigidita: il prompt impone di rispondere nella stessa lingua dell'obiettivo/summary esistenti, fallback English se ambiguo
   - residui NON affrontati in questo passaggio:
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)
     - esercizio automatico del proxy Headroom nel wrapper DGX (`F13`)
-  - suite locale dopo fix multi-match snippets: `32 passed`
+  - suite locale dopo fix caso G + vincolo lingua LLM: `34 passed`
 
 ## Prossimi step consigliati
 

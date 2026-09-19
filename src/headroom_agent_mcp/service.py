@@ -316,6 +316,7 @@ class DiscoveryService:
         snippets: list[SmallSnippet] = []
         terms = self._search_terms(request)
         snippet_limit = min(max(request.raw_read_budget * 2, 1), 8)
+        per_doc_limit = min(5, snippet_limit)
         for doc in documents[: request.raw_read_budget]:
             if len(snippets) >= snippet_limit:
                 break
@@ -330,7 +331,7 @@ class DiscoveryService:
             for matched_index in matched_indices:
                 start = max(matched_index - 2, 0)
                 end = min(matched_index + 3, len(lines))
-                if start <= covered_until:
+                if end <= covered_until:
                     continue
                 snippet = "\n".join(lines[start:end])[: self.request_defaults.max_snippet_chars]
                 if not snippet.strip():
@@ -344,7 +345,7 @@ class DiscoveryService:
                 )
                 covered_until = end
                 snippets_for_doc += 1
-                if len(snippets) >= snippet_limit or snippets_for_doc >= 3:
+                if len(snippets) >= snippet_limit or snippets_for_doc >= per_doc_limit:
                     break
         return snippets
 
@@ -423,6 +424,7 @@ class DiscoveryService:
                 system_prompt=(
                     "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
                     "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
+                    "Respond in the same language as the user's objective and existing summary; if unclear, respond in English. "
                     "Return JSON with optional keys: summary, recommended_next_action, confidence."
                 ),
                 user_prompt=(

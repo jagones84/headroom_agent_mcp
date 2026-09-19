@@ -184,3 +184,45 @@ def test_codebase_discovery_snippets_cover_multiple_matching_regions_in_same_fil
     combined_snippets = "\n".join(snippet.snippet for snippet in response.small_snippets if snippet.path.endswith("service.py"))
     assert "except OSError" in combined_snippets
     assert "except ValueError" in combined_snippets
+
+
+def test_codebase_discovery_snippets_keep_all_exception_regions_in_dense_file(tmp_path: Path) -> None:
+    target = tmp_path / "service.py"
+    target.write_text(
+        "def single_block() -> int:\n"
+        "    try:\n"
+        "        return load_one()\n"
+        "    except ValueError:\n"
+        "        return 0\n"
+        "    except TypeError:\n"
+        "        return 1\n"
+        "    except OverflowError:\n"
+        "        return 2\n"
+        "\n"
+        "def spread() -> int:\n"
+        "    try:\n"
+        "        return load_two()\n"
+        "    except KeyError:\n"
+        "        return 3\n"
+        "    marker = True\n"
+        "    try:\n"
+        "        return load_three()\n"
+        "    except IndexError:\n"
+        "        return 4\n",
+        encoding="utf-8",
+    )
+    request = DiscoveryRequest(
+        objective="Find all handled exceptions in service parsing",
+        objective_type=ObjectiveType.CODEBASE_DISCOVERY,
+        scope_paths=[str(tmp_path)],
+        query_hints=["except", "ValueError", "TypeError", "OverflowError", "KeyError", "IndexError"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=4,
+    )
+
+    response = DiscoveryService().run(request)
+
+    combined_snippets = "\n".join(snippet.snippet for snippet in response.small_snippets if snippet.path.endswith("service.py"))
+    for exception_name in ("ValueError", "TypeError", "OverflowError", "KeyError", "IndexError"):
+        assert f"except {exception_name}" in combined_snippets
