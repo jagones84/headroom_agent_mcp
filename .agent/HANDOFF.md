@@ -68,7 +68,13 @@
 - `LICENSE` aggiunta come `Apache-2.0`
 - `NOTICE` aggiunto per chiarire attribuzione e non-affiliazione rispetto a `headroom`
 - `README` aggiornato con sezione `License And Attribution`
-- Blocco rimasto:
-  - `gh` installato
-  - `gh auth status` -> non autenticato
-  - il push remoto richiede login GitHub/token valido su questa macchina
+- Pubblicazione completata:
+  - repo: `https://github.com/jagones84/headroom_agent_mcp`
+  - branch pubblicato: `main`
+  - remote `origin` configurato verso GitHub
+- Metodo usato:
+  - token letto da `Z:\.hermes\.env`
+  - script operativo: `scripts/publish_github.py`
+- Lezione:
+  - la connessione GitHub visibile in Trae non garantisce `gh auth status` valido nella shell locale
+  - il path affidabile qui e' stato usare `GITHUB_TOKEN` direttamente

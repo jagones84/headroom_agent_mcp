@@ -65,6 +65,9 @@ Build a new overlay repo, separate from upstream `headroom`, that exposes a disc
   - same `Apache-2.0` license text
   - explicit `NOTICE` clarifying this is a separate overlay/companion project
   - `README` section that references upstream for interoperability while avoiding implied endorsement
-- GitHub publication is currently blocked only by missing GitHub authentication on this host:
-  - `gh` installed
-  - `gh auth status` -> not logged in
+- GitHub publication succeeded using `GITHUB_TOKEN` loaded from `Z:\.hermes\.env` and a local helper script:
+  - `scripts/publish_github.py`
+  - published repo: `https://github.com/jagones84/headroom_agent_mcp`
+- Important publication detail:
+  - Trae UI GitHub connectivity did not imply `gh auth status` was logged in for the shell
+  - using the token directly from the shared env file was the reliable path
