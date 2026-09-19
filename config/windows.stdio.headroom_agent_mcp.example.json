@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "headroom_agent_discovery": {
+      "type": "STDIO",
+      "description": "Headroom Agent MCP discovery server (Windows stdio Python launcher)",
+      "command": "python",
+      "args": [
+        "Z:\\Repositories\\headroom_agent_mcp\\scripts\\headroom_agent_stdio_windows.py"
+      ],
+      "env": {}
+    }
+  }
+}

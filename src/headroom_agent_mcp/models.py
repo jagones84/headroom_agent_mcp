@@ -50,6 +50,7 @@ class CommandResult(BaseModel):
     exit_code: int
     stdout: str
     stderr: str
+    blocked: bool = False
 
 
 class DiscoveryRequest(BaseModel):
@@ -89,3 +90,6 @@ class DiscoveryResponse(BaseModel):
     uncertainties: list[str]
     recommended_next_action: str
     confidence: str
+    llm_enriched: bool = False
+    llm_error: str | None = None
+    llm_profile_used: str | None = None

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from .config import RequestDefaults
 from .llm import OpenAICompatibleLLMClient
 from .models import (
     CandidateFile,
@@ -21,7 +23,7 @@ from .models import (
 from .terminal import run_allowed_commands
 
 
-SKIP_DIR_NAMES = {".git", "node_modules", ".venv", "__pycache__"}
+SKIP_DIR_NAMES = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
 TEXT_FILE_SUFFIXES = {
     ".md",
     ".txt",
@@ -51,10 +53,25 @@ class EvidenceDocument:
 class DiscoveryService:
     """Collect scoped evidence and shape it for the parent agent."""
 
-    def __init__(self, *, llm_client: OpenAICompatibleLLMClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        llm_client: OpenAICompatibleLLMClient | None = None,
+        default_model_profile: str | None = None,
+        request_defaults: RequestDefaults | dict[str, object] | None = None,
+        command_profiles: dict[CommandAllowlistProfile, list[list[str]]] | None = None,
+    ) -> None:
         self.llm_client = llm_client
+        self.default_model_profile = default_model_profile
+        self.request_defaults = (
+            request_defaults
+            if isinstance(request_defaults, RequestDefaults)
+            else RequestDefaults.model_validate(request_defaults or {})
+        )
+        self.command_profiles = command_profiles or {}
 
     def run(self, request: DiscoveryRequest) -> DiscoveryResponse:
+        request = self._apply_request_defaults(request)
         if request.objective_type is ObjectiveType.CODEBASE_DISCOVERY:
             response = self._run_codebase_discovery(request)
         elif request.objective_type is ObjectiveType.LOGS_TRIAGE:
@@ -62,17 +79,26 @@ class DiscoveryService:
         else:
             response = self._run_docs_research(request)
 
-        if request.model_profile and self.llm_client:
-            response = self._maybe_enrich_with_llm(request, response)
+        effective_model_profile = request.model_profile or self.default_model_profile
+        if effective_model_profile and self.llm_client:
+            response = self._maybe_enrich_with_llm(request, response, effective_model_profile)
         return response
+
+    def _apply_request_defaults(self, request: DiscoveryRequest) -> DiscoveryRequest:
+        payload = request.model_dump()
+        for field_name in ("command_allowlist_profile", "max_files", "max_commands", "raw_read_budget", "return_snippets"):
+            if field_name not in request.model_fields_set:
+                payload[field_name] = getattr(self.request_defaults, field_name)
+        return DiscoveryRequest.model_validate(payload)
 
     def _run_codebase_discovery(self, request: DiscoveryRequest) -> DiscoveryResponse:
         documents = self._collect_documents(request)
+        candidate_documents = documents[: request.max_files]
         candidate_files = [
             CandidateFile(path=doc.path, reason="High keyword overlap with objective", score=round(doc.score, 2))
-            for doc in documents[: request.max_files]
+            for doc in candidate_documents
         ]
-        candidate_symbols = self._extract_symbols(documents)
+        candidate_symbols = self._extract_symbols(candidate_documents)
         snippets = self._build_snippets(documents, request)
         findings = [
             f"{Path(doc.path).name}: matched discovery terms with score {round(doc.score, 2)}"
@@ -106,6 +132,7 @@ class DiscoveryService:
             request.command_allowlist_profile,
             cwd=self._first_real_path(request.scope_paths),
             max_commands=request.max_commands,
+            allowed_commands=self.command_profiles.get(request.command_allowlist_profile),
         )
         documents = self._collect_documents(request)
         findings = self._extract_error_findings(documents, command_results)
@@ -197,10 +224,13 @@ class DiscoveryService:
 
     def _iter_text_files(self, root: Path):
         for path in root.rglob("*"):
-            if any(part in SKIP_DIR_NAMES for part in path.parts):
+            if self._should_skip_path(path):
                 continue
             if path.is_file() and path.suffix.lower() in TEXT_FILE_SUFFIXES:
                 yield path
+
+    def _should_skip_path(self, path: Path) -> bool:
+        return any(part in SKIP_DIR_NAMES or part.endswith(".egg-info") for part in path.parts)
 
     def _read_text_file(self, path: Path) -> str:
         try:
@@ -219,12 +249,13 @@ class DiscoveryService:
     def _score_text(self, path: str, text: str, terms: list[str]) -> float:
         if not terms:
             return 1.0
-        path_lower = path.lower()
-        text_lower = text.lower()
+        path_terms = re.findall(r"[a-zA-Z0-9_]+", path.lower())
+        text_terms = re.findall(r"[a-zA-Z0-9_]+", text.lower())
+        text_weight = max(len(text_terms), 1)
         score = 0.0
         for term in terms:
-            score += path_lower.count(term) * 3
-            score += text_lower.count(term)
+            score += path_terms.count(term) * 3
+            score += (text_terms.count(term) * 100.0) / text_weight
         return score
 
     def _extract_symbols(self, documents: list[EvidenceDocument]) -> list[CandidateSymbol]:
@@ -268,7 +299,7 @@ class DiscoveryService:
                     break
             start = max(matched_index - 2, 0)
             end = min(matched_index + 3, len(lines))
-            snippet = "\n".join(lines[start:end])[:400]
+            snippet = "\n".join(lines[start:end])[: self.request_defaults.max_snippet_chars]
             if snippet.strip():
                 snippets.append(
                     SmallSnippet(
@@ -304,10 +335,16 @@ class DiscoveryService:
             return path if path.is_dir() else path.parent
         return None
 
-    def _maybe_enrich_with_llm(self, request: DiscoveryRequest, response: DiscoveryResponse) -> DiscoveryResponse:
+    def _maybe_enrich_with_llm(
+        self,
+        request: DiscoveryRequest,
+        response: DiscoveryResponse,
+        model_profile: str,
+    ) -> DiscoveryResponse:
+        payload = response.model_dump()
         try:
             llm_json = self.llm_client.complete_json(
-                request.model_profile,
+                model_profile,
                 system_prompt=(
                     "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
                     "Return JSON with optional keys: summary, relevant_findings, recommended_next_action, confidence."
@@ -320,13 +357,22 @@ class DiscoveryService:
                     f"Raw reads for parent: {response.raw_reads_needed_by_parent}\n"
                 ),
             )
-        except Exception:
-            return response
+        except Exception as exc:
+            print(
+                f"[headroom_agent_mcp] LLM enrichment failed for profile {model_profile}: {exc}",
+                file=sys.stderr,
+            )
+            payload["llm_enriched"] = False
+            payload["llm_error"] = str(exc)
+            payload["llm_profile_used"] = model_profile
+            return DiscoveryResponse.model_validate(payload)
 
-        payload = response.model_dump()
         for key in ("summary", "recommended_next_action", "confidence"):
             if isinstance(llm_json.get(key), str) and llm_json[key]:
                 payload[key] = llm_json[key]
         if isinstance(llm_json.get("relevant_findings"), list) and llm_json["relevant_findings"]:
             payload["relevant_findings"] = [str(item) for item in llm_json["relevant_findings"]]
+        payload["llm_enriched"] = True
+        payload["llm_error"] = None
+        payload["llm_profile_used"] = model_profile
         return DiscoveryResponse.model_validate(payload)

@@ -17,7 +17,12 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
     """Create the MCP server instance."""
     config = HeadroomAgentConfig.from_sources(config_path)
     llm_client = OpenAICompatibleLLMClient(config=config) if config.llm_profiles else None
-    service = DiscoveryService(llm_client=llm_client)
+    service = DiscoveryService(
+        llm_client=llm_client,
+        default_model_profile=config.default_model_profile,
+        request_defaults=config.request_defaults,
+        command_profiles=config.command_profiles,
+    )
     mcp = FastMCP("headroom_agent_mcp")
 
     @mcp.tool(

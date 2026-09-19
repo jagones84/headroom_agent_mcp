@@ -19,7 +19,7 @@ if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
 fi
 
 export HEADROOM_AGENT_MODEL_PROVIDER="openrouter"
-export HEADROOM_AGENT_MODEL_NAME="openrouter/deepseek/deepseek-chat"
+export HEADROOM_AGENT_MODEL_NAME="deepseek/deepseek-v4-flash"
 export HEADROOM_AGENT_BASE_URL="https://openrouter.ai/api/v1"
 export HEADROOM_AGENT_API_KEY="$OPENROUTER_API_KEY"
 export HEADROOM_PROXY_URL="$PROXY_URL"

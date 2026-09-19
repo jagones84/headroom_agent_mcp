@@ -47,8 +47,12 @@ Output highlights:
 - `candidate_files`
 - `candidate_symbols`
 - `small_snippets`
+- `commands_run` (blocked commands are returned with `exit_code=-1`, `blocked=true`)
 - `raw_reads_needed_by_parent`
 - `recommended_next_action`
+- `llm_enriched`
+- `llm_error`
+- `llm_profile_used`
 
 The parent agent should treat `raw_reads_needed_by_parent` as the handoff for precise next reads before any edit.
 
@@ -78,6 +82,7 @@ Instead, if you configure the subagent model to talk to a Headroom proxy, the su
 
 Copy `.env.template` to `.env` or export the variables in your runtime:
 
+- `HEADROOM_AGENT_PYTHON` (optional explicit interpreter path for launchers)
 - `HEADROOM_AGENT_MODEL_PROVIDER`
 - `HEADROOM_AGENT_MODEL_NAME`
 - `HEADROOM_AGENT_BASE_URL`
@@ -86,9 +91,25 @@ Copy `.env.template` to `.env` or export the variables in your runtime:
 
 If `HEADROOM_PROXY_URL` is set, the configured LLM profile can route through it.
 
+`config/config.yaml` is live:
+- `defaults` are applied when the caller omits optional request fields like `max_files`, `max_commands`, `raw_read_budget`, `return_snippets`, and `command_allowlist_profile`
+- `profiles` define the allowed tokenized command prefixes for each command profile
+
+LLM enrichment behavior:
+- if an LLM profile exists and the caller does not pass `model_profile`, the server falls back to the configured default profile
+- LLM failures are exposed in the response via `llm_error` and logged to `stderr` without corrupting the stdio MCP stream
+
+Launchers:
+- Windows stable launcher: `scripts/headroom_agent_stdio_windows.py`
+- Windows convenience shim: `scripts/headroom_agent_stdio_windows.cmd`
+- Unix/Linux launcher: `scripts/headroom_agent_stdio_unix.sh`
+- DGX compatibility shim: `scripts/openclaw_stdio_dgx.sh`
+
 ## OpenClaw Example
 
 Add a server entry like the example in `config/openclaw.headroom_agent_mcp.example.json`.
+
+For Windows hosts, use `config/windows.stdio.headroom_agent_mcp.example.json`.
 
 The MCP description is intentionally explicit so the parent agent knows:
 - when to call it

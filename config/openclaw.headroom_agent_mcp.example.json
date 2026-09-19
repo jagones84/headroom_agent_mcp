@@ -3,20 +3,9 @@
     "servers": {
       "headroom_agent_discovery": {
         "enabled": true,
-        "command": "python3",
-        "args": [
-          "-m",
-          "headroom_agent_mcp.server"
-        ],
+        "command": "/home/jagones/Repositories/headroom_agent_mcp/scripts/headroom_agent_stdio_unix.sh",
+        "args": [],
         "cwd": "/home/jagones/Repositories/headroom_agent_mcp",
-        "env": {
-          "PYTHONPATH": "/home/jagones/Repositories/headroom_agent_mcp/src",
-          "HEADROOM_AGENT_MODEL_PROVIDER": "openrouter",
-          "HEADROOM_AGENT_MODEL_NAME": "openrouter/deepseek/deepseek-chat",
-          "HEADROOM_AGENT_BASE_URL": "https://openrouter.ai/api/v1",
-          "HEADROOM_AGENT_API_KEY": "${OPENROUTER_API_KEY}",
-          "HEADROOM_PROXY_URL": "http://127.0.0.1:8788"
-        },
         "connectionTimeoutMs": 120000
       }
     }
