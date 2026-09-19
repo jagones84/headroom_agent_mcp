@@ -42,13 +42,14 @@
 - Suite locale dopo retrieval CCR + hardening client LLM 2026-09-19 (sessione 2): `66 passed`
 - Suite locale dopo catena fallback websearch 2026-09-19 (sessione 3): `73 passed`
 - Suite locale dopo retry CCR metadata-only 2026-09-19 (sessione 4): `78 passed`
+- Suite locale dopo dedup + rerank BM25 websearch 2026-09-19 (sessione 5): `88 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
   - venv su `Z:` fallisce per esecuzione UNC/permessi
   - venv su `C:\Users\giova\.venvs\...` funziona
 - DGX:
-  - `scripts/run_tests_dgx.sh` -> `78 passed`
+  - `scripts/run_tests_dgx.sh` -> `88 passed`
   - `scripts/smoke_check_dgx.sh` -> `ok server=headroom_agent_mcp`
   - `scripts/smoke_openrouter_headroom_dgx.sh` -> risposta JSON valida di `codebase_discovery` con ranking file/simboli/snippet
 
@@ -191,6 +192,24 @@ Obiettivo: tenere ~75% di risparmio **senza** degradare il summary, dando al LLM
   - Tentativi intermedi scartati dai dati live: retry con budget dimezzato ma top-2 docs -> ancora 3 call aperte (2 run). I marker scalano col NUMERO di item, non solo coi char.
 - Prova LIVE decisiva (`scripts/smoke_web_research_dgx.sh`, proxy CCR on): primo tentativo 10 call aperte -> `retrying once with metadata-only evidence` -> `LLM enrichment keys=['confidence', 'recommended_next_action', 'summary'] summary_chars=1187`; report JSON: `llm_enriched: True`, `llm_error: None`, summary grounded ("Based on 5 web sources..."). La request retry (`before=1654 after=1447`) e' piccola e quasi non compressa: giusto, e' gia' magra.
 - Test: 5 nuovi (errore tipizzato, caso non-CCR, retry-con-successo, retry-doppio-fail onesto, `max_documents`) -> suite `78 passed` (Windows + DGX).
+
+## Dedup + rerank BM25 della websearch (2026-09-19, sessione 5)
+
+- Lacuna chiusa: con 5 risultati il provider poteva restituire piu' pagine dello stesso sito o lo stesso URL due volte, e il ranking era un semplice conteggio di keyword (premiava le pagine lunghe, non sapeva distinguere un termine discriminativo da uno comune).
+- Fonti usate (grounding, non memoria):
+  - Robertson & Zaragoza, "The Probabilistic Relevance Framework: BM25 and Beyond" (2009), <https://doi.org/10.1561/1500000019>
+  - Apache Lucene `BM25Similarity` (stesse forme, stessi default k1=1.5 / b=0.75), <https://lucene.apache.org/core/9_0_0/core/org/apache/lucene/search/similarities/BM25Similarity.html>
+  - URL Standard (il fragment non arriva al server), <https://url.spec.whatwg.org/#concept-url-fragment> + RFC 3986 §6.2.2 (normalizzazione sintattica)
+  - implementazione di riferimento letta in `headroom/headroom/relevance/bm25.py` (IDF floorato variante Lucene)
+- Nuove funzioni pure in `src/headroom_agent_mcp/websearch.py`:
+  - `domain_of()` / `canonicalize_url()`: chiave di confronto che ignora schema, fragment e parametri di tracking (`utm_*`, `fbclid`, ...). Cosi' `http://www.example.com/a/?utm_source=x#top` e `https://example.com/a` collassano.
+  - `dedupe_search_results(results, max_per_domain=2)`: droppa URL duplicati e limita i risultati per dominio, preservando l'ordine del provider.
+  - `content_fingerprint(text)`: chiave cheap sui primi 400 char normalizzati (case + whitespace) per scoprire mirror/sindacazioni.
+  - `bm25_scores(documents, query)`: Okapi BM25 a dipendenze zero (token `[a-z0-9_]+`, IDF floato, saturazione `k1`, normalizzazione `b`).
+- `service.py::_run_web_research` ora: dedup PRIMA dei fetch -> fetch -> dedup sul contenuto -> rerank BM25 sul testo `titolo + body` -> sort. `_score_text`/`_search_terms` restano invariati per codebase/logs/docs.
+- Trasparenza: i drop finiscono in `uncertainties` ("Dropped N duplicate search result(s)...", "Skipped N page(s) whose readable text duplicated an earlier source."), coerente con la politica F20/F22 "dichiara, non nascondere".
+- Test: 10 nuovi (domain_of, canonicalize, dedup URL, cap per dominio, fingerprint, BM25 ranking, BM25 length-normalization, BM25 query vuota, rerank+drop a livello servizio, skip contenuto duplicato) -> suite `88 passed` (Windows + DGX).
+- Verifica LIVE (`smoke_web_research_dgx.sh`, proxy CCR on): 5 fonti su 5 **domini distinti** (mem0.ai, langchain.com, zenml.io, zylos.ai, preprints.org), score BM25 decrescenti 4.60 / 4.29 / 4.07 / 2.95 / 2.37, `llm_enriched=true`, summary grounded. Nessun drop in questa run (uncertainties solo col cross-check generico).
 
 ## Prossimi step consigliati
 

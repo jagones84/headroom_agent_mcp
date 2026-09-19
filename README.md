@@ -70,6 +70,10 @@ Both forms are valid, so existing callers keep working:
 - providers are tried in order and the first one that returns results wins: `tavily` -> `brave` -> `duckduckgo`
 - `TAVILY_API_KEY` / `BRAVE_API_KEY` gate the first two; **DuckDuckGo needs no key** and is always the last fallback (it parses the no-JS `html.duckduckgo.com` endpoint, so it can be rate-limited)
 - if every provider errors, the run reports an uncertainty naming them; if a provider just returns nothing, the response states which one was tried
+- results are **deduped before fetching**: the URL key ignores scheme, fragment (`#...`) and tracking parameters (`utm_*`, `fbclid`, ...), and no single domain may contribute more than `2` results (`MAX_RESULTS_PER_DOMAIN` in `src/headroom_agent_mcp/websearch.py`)
+- pages whose readable text repeats an earlier source are skipped (mirrors/syndications), keyed on a normalized 400-char prefix
+- survivors are **reranked with Okapi BM25** over title + body (zero dependencies): term frequency saturates, length is normalized, and each query term is IDF-weighted — so a short on-topic page outranks a long padded one
+- drops are always declared in `uncertainties`, never silent
 
 Output highlights:
 - `relevant_findings`
@@ -349,7 +353,7 @@ Implemented:
 - safe terminal policy
 - deterministic discovery service
 - optional OpenAI-compatible LLM enrichment
-- web search (`tavily` / `brave` / keyless `duckduckgo`) with readability extraction and provider fallback
+- web search (`tavily` / `brave` / keyless `duckduckgo`) with readability extraction, provider fallback, URL/content dedup and BM25 reranking
 - MCP server and CLI smoke check
 
 Not implemented:

@@ -20,7 +20,13 @@ from .models import (
     SmallSnippet,
 )
 from .terminal import run_allowed_commands
-from .websearch import fetch_url_readable, search_web
+from .websearch import (
+    bm25_scores,
+    content_fingerprint,
+    dedupe_search_results,
+    fetch_url_readable,
+    search_web,
+)
 
 
 SKIP_DIR_NAMES = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
@@ -211,27 +217,38 @@ class DiscoveryService:
         except Exception as exc:
             results, provider, search_error = [], None, str(exc)
 
-        terms = self._search_terms(request)
+        # Shape the result list before paying for a fetch on each entry: backends
+        # return several pages per site and can serve the same URL twice.
+        unique_results = dedupe_search_results(results)
+
         documents: list[EvidenceDocument] = []
         findings: list[str] = []
-        for result in results:
+        ranked_text: list[str] = []
+        seen_content: set[str] = set()
+        content_duplicates = 0
+        for result in unique_results:
             text, truncated = self._fetch_url(result.url)
             if not text:
                 text = result.snippet
                 truncated = False
             if not text.strip():
                 continue
+            fingerprint = content_fingerprint(text)
+            if fingerprint and fingerprint in seen_content:
+                content_duplicates += 1
+                continue
+            seen_content.add(fingerprint)
             documents.append(
-                EvidenceDocument(
-                    path=result.url,
-                    text=text,
-                    score=self._score_text(result.url, text, terms),
-                    truncated=truncated,
-                )
+                EvidenceDocument(path=result.url, text=text, score=0.0, truncated=truncated)
             )
+            # The title is part of what the backend matched on, so it feeds the
+            # reranker even though only the body becomes evidence.
+            ranked_text.append(f"{result.title}\n{text}")
             if result.snippet:
                 findings.append(f"{result.title or result.url}: {result.snippet[:200]}")
 
+        for document, score in zip(documents, bm25_scores(ranked_text, query)):
+            document.score = score
         documents.sort(key=lambda item: item.score, reverse=True)
         candidate_files = [
             CandidateFile(path=doc.path, reason="Web search result", score=round(doc.score, 2))
@@ -241,6 +258,16 @@ class DiscoveryService:
         self._llm_documents = documents
 
         uncertainties = self._truncation_uncertainties(documents[: request.max_files])
+        dropped_results = len(results) - len(unique_results)
+        if dropped_results > 0:
+            uncertainties.append(
+                f"Dropped {dropped_results} duplicate search result(s) (same URL or an over-represented "
+                "domain) before fetching; raise search_results_limit or vary the objective to widen coverage."
+            )
+        if content_duplicates > 0:
+            uncertainties.append(
+                f"Skipped {content_duplicates} page(s) whose readable text duplicated an earlier source."
+            )
         if search_error:
             uncertainties.append(f"Web search failed: {search_error}")
         elif provider is None:

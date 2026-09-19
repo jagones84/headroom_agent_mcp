@@ -15,6 +15,11 @@ from headroom_agent_mcp.websearch import (
     SearchResult,
     _decode_duckduckgo_url,
     _DuckDuckGoParser,
+    bm25_scores,
+    canonicalize_url,
+    content_fingerprint,
+    dedupe_search_results,
+    domain_of,
     extract_readable_text,
     resolve_search_chain,
     search_web,
@@ -268,3 +273,136 @@ def test_search_web_raises_when_every_provider_errors(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError):
         search_web("query", 2)
+
+
+def test_domain_of_strips_www_case_and_port() -> None:
+    assert domain_of("HTTPS://WWW.Example.COM:8443/path") == "example.com"
+    assert domain_of("https://docs.python.org/3/") == "docs.python.org"
+
+
+def test_canonicalize_url_ignores_fragment_tracking_and_scheme() -> None:
+    noisy = canonicalize_url("https://www.Example.com/Page/?utm_source=news&id=7#section")
+    clean = canonicalize_url("http://example.com/Page?id=7")
+
+    assert noisy == clean == "example.com/Page?id=7"
+    assert canonicalize_url("") == ""
+
+
+def test_dedupe_search_results_drops_duplicate_urls() -> None:
+    results = [
+        SearchResult(title="A", url="https://example.com/a", snippet=""),
+        SearchResult(title="A mirror", url="https://www.example.com/a/#top", snippet=""),
+        SearchResult(title="B", url="https://other.example/b", snippet=""),
+    ]
+
+    kept = dedupe_search_results(results)
+
+    assert [item.title for item in kept] == ["A", "B"]
+
+
+def test_dedupe_search_results_caps_results_per_domain() -> None:
+    results = [
+        SearchResult(title=f"p{index}", url=f"https://github.com/repo/{index}", snippet="")
+        for index in range(4)
+    ]
+    results.append(SearchResult(title="docs", url="https://docs.python.org/3/", snippet=""))
+
+    capped = dedupe_search_results(results, max_per_domain=2)
+
+    assert [item.title for item in capped] == ["p0", "p1", "docs"]
+    assert len(dedupe_search_results(results, max_per_domain=0)) == 5
+
+
+def test_content_fingerprint_normalizes_case_and_whitespace() -> None:
+    assert content_fingerprint("Hello   World\n\nAgain") == content_fingerprint("hello world again")
+
+
+def test_bm25_scores_rank_the_page_matching_the_query_first() -> None:
+    documents = [
+        "unrelated page about gardening and weather",
+        "context compression for llm agents reduces token usage",
+        "a page mentioning compression once",
+    ]
+
+    scores = bm25_scores(documents, "context compression llm agents")
+
+    assert scores[0] == 0.0
+    assert scores[1] > scores[2] > 0.0
+
+
+def test_bm25_scores_length_normalize_so_padding_does_not_win() -> None:
+    padded = "compression " + " ".join(f"filler{index}" for index in range(200))
+
+    scores = bm25_scores(["compression", padded], "compression")
+
+    assert scores[0] > scores[1]
+
+
+def test_bm25_scores_return_zeros_without_a_query() -> None:
+    assert bm25_scores(["a b c"], "") == [0.0]
+    assert bm25_scores([], "query") == []
+
+
+def test_web_research_dedupes_reranks_and_declares_dropped_results(monkeypatch) -> None:
+    results = [
+        SearchResult(title="Mirror one", url="https://mirror.example/a", snippet="s1"),
+        SearchResult(title="Mirror two", url="https://www.mirror.example/a/", snippet="s2"),
+        SearchResult(title="Deep dive", url="https://deep.example/page", snippet="s3"),
+        SearchResult(title="Filler", url="https://filler.example/x", snippet="s4"),
+    ]
+    monkeypatch.setattr(
+        "headroom_agent_mcp.service.search_web",
+        lambda query, limit, provider=None: (results, "brave"),
+    )
+    bodies = {
+        "https://mirror.example/a": "totally unrelated gardening notes",
+        "https://deep.example/page": "context compression for llm agents reduces token usage substantially",
+        "https://filler.example/x": "a short note that mentions compression once",
+    }
+    monkeypatch.setattr(
+        "headroom_agent_mcp.service.fetch_url_readable",
+        lambda url: (bodies[url], False),
+    )
+
+    response = DiscoveryService(llm_evidence_char_budget=12000).run(
+        DiscoveryRequest(
+            objective="context compression for llm agents",
+            objective_type=ObjectiveType.WEB_RESEARCH,
+            command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+            max_files=5,
+        )
+    )
+
+    assert [item.path for item in response.candidate_files] == [
+        "https://deep.example/page",
+        "https://filler.example/x",
+        "https://mirror.example/a",
+    ]
+    assert any("duplicate search result" in item for item in response.uncertainties)
+
+
+def test_web_research_skips_pages_that_repeat_earlier_text(monkeypatch) -> None:
+    results = [
+        SearchResult(title="First", url="https://one.example/a", snippet=""),
+        SearchResult(title="Syndicated copy", url="https://two.example/b", snippet=""),
+    ]
+    shared = "Context compression for llm agents. " * 20
+    monkeypatch.setattr(
+        "headroom_agent_mcp.service.search_web",
+        lambda query, limit, provider=None: (results, "brave"),
+    )
+    monkeypatch.setattr(
+        "headroom_agent_mcp.service.fetch_url_readable",
+        lambda url: (shared, False),
+    )
+
+    response = DiscoveryService(llm_evidence_char_budget=12000).run(
+        DiscoveryRequest(
+            objective="context compression for llm agents",
+            objective_type=ObjectiveType.WEB_RESEARCH,
+            command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        )
+    )
+
+    assert [item.path for item in response.candidate_files] == ["https://one.example/a"]
+    assert any("duplicated an earlier source" in item for item in response.uncertainties)
