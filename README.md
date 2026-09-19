@@ -38,6 +38,7 @@ Input highlights:
 - `objective`: concrete goal for this run
 - `objective_type`: `docs_research` | `logs_triage` | `codebase_discovery`
 - `scope_paths`: files, directories, or URLs
+  URL fetches are bounded and only the first 20,000 characters of each source are inspected.
 - `query_hints`: extra terms to bias search
 - `terminal_commands`: optional tokenized safe commands like `["git", "status"]`
 - `command_allowlist_profile`: `safe_readonly` or `safe_terminal`
@@ -48,6 +49,7 @@ Output highlights:
 - `candidate_files`
 - `candidate_symbols`
 - `small_snippets`
+- `uncertainties`
 - `commands_run` (blocked commands are returned with `exit_code=-1`, `blocked=true`)
 - `raw_reads_needed_by_parent`
 - `recommended_next_action`
@@ -145,6 +147,8 @@ Current retrieval behavior:
 - directory scans collect standard source/docs/log files by suffix
 - directory scans also collect common config files by name, including `.env`, `.env.template`, `Dockerfile`, `Makefile`, and `Procfile`
 - snippet budget is now distributed across top documents in rounds, so one dense file does not starve the rest of the evidence set
+- local file reads and direct URL fetches are bounded to the first 20,000 characters per source to cap memory usage and latency
+- when a source is truncated by that cap, the response adds an `uncertainties` warning instead of treating missing later matches as evidence of absence
 
 Launchers:
 - Windows stable launcher: `scripts/headroom_agent_stdio_windows.py`

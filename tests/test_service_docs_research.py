@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from headroom_agent_mcp.models import CommandAllowlistProfile, DiscoveryRequest, ObjectiveType
 from headroom_agent_mcp.service import DiscoveryService
@@ -75,3 +76,42 @@ def test_docs_research_runs_terminal_commands(tmp_path: Path) -> None:
     assert len(response.commands_run) == 1
     assert response.commands_run[0].command == ["git", "status"]
     assert response.commands_run[0].blocked is False
+
+
+def test_docs_research_declares_uncertainty_when_large_file_was_truncated(tmp_path: Path) -> None:
+    large_file = tmp_path / "big_far.py"
+    large_file.write_text(("x" * 21050) + "\nNEEDLE_AT_END = True\n", encoding="utf-8")
+    request = DiscoveryRequest(
+        objective="Find NEEDLE_AT_END",
+        objective_type=ObjectiveType.DOCS_RESEARCH,
+        scope_paths=[str(large_file)],
+        query_hints=["NEEDLE_AT_END"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=2,
+    )
+
+    response = DiscoveryService().run(request)
+
+    assert response.candidate_files
+    assert any("truncated" in item.lower() and "big_far.py" in item for item in response.uncertainties)
+
+
+def test_docs_research_uses_bounded_file_read_instead_of_path_read_text(tmp_path: Path) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text("HEADROOM_AGENT_BASE_URL=http://localhost:8000/v1\n", encoding="utf-8")
+    request = DiscoveryRequest(
+        objective="Find the configured base URL",
+        objective_type=ObjectiveType.DOCS_RESEARCH,
+        scope_paths=[str(readme)],
+        query_hints=["HEADROOM_AGENT_BASE_URL"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=2,
+    )
+
+    with patch("headroom_agent_mcp.service.Path.read_text", side_effect=AssertionError("read_text should not be used")):
+        response = DiscoveryService().run(request)
+
+    assert response.candidate_files
+    assert any("headroom_agent_base_url" in finding.lower() for finding in response.relevant_findings)

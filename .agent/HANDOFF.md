@@ -35,6 +35,7 @@
 ## Test e verifica
 
 - Suite TDD locale aggiornata dopo grounding fix + LLM hardening 2026-09-19: `27 passed`
+- Suite locale finale dopo hardening large-file / bounded-fetch 2026-09-19: `38 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
@@ -90,6 +91,9 @@
   - fairness snippet migliorata: il budget globale viene distribuito round-robin tra i top documenti, cosi' un file denso non prosciuga tutta l'evidenza disponibile
   - lingua output LLM irrigidita: il prompt usa `response_language`; default English, override esplicito del caller quando serve
   - README riallineato alla configurazione reale: ora documenta inline i template MCP JSON per Trae/Windows e OpenClaw/Linux, piu' la regola esplicita su chi decide il provider attivo (`HEADROOM_AGENT_MODEL_PROVIDER` vs override `model_profile`)
+  - F20 chiuso: i file molto grandi non causano piu' falsi negativi silenziosi senza avviso; se la lettura viene troncata il tool espone una `uncertainties` esplicita
+  - F21 chiuso: le letture locali non usano piu' `Path.read_text()[:20000]`; ora leggono in modo bounded solo il preview necessario senza caricare tutto il file in memoria
+  - F22 chiuso: anche il fetch diretto di URL e' bounded e la documentazione del tool/README ora dichiara esplicitamente questo limite operativo
   - residui NON affrontati in questo passaggio:
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)

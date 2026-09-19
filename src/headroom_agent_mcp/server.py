@@ -46,8 +46,13 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         - objective: concrete question or goal for this run
         - objective_type: docs_research, logs_triage, or codebase_discovery
         - scope_paths: files, directories, or URLs to inspect
+          local files and direct URL fetches are inspected with a bounded preview budget
         - query_hints: optional extra terms to bias search/scoring
         - terminal_commands: optional tokenized safe commands, e.g. [["git","status"],["pytest","-q"]]
+
+        Notes:
+        - large files and fetched URLs are truncated to a bounded preview instead of being read fully into memory
+        - when truncation happens, the response surfaces it through `uncertainties`
         """
 
         return service.run(params).model_dump()

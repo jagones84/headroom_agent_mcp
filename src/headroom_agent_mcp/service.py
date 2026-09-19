@@ -48,6 +48,8 @@ TEXT_FILE_NAMES = {
     "makefile",
     "procfile",
 }
+TEXT_READ_LIMIT = 20_000
+HTTP_FETCH_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass
@@ -55,6 +57,7 @@ class EvidenceDocument:
     path: str
     text: str
     score: float
+    truncated: bool = False
 
 
 class DiscoveryService:
@@ -126,7 +129,7 @@ class DiscoveryService:
             small_snippets=snippets if request.return_snippets else [],
             commands_run=command_results,
             raw_reads_needed_by_parent=raw_reads,
-            uncertainties=[
+            uncertainties=self._truncation_uncertainties(candidate_documents) + [
                 "This tool narrows the search space but does not replace raw file reads for final edits.",
             ],
             recommended_next_action=(
@@ -160,7 +163,7 @@ class DiscoveryService:
             small_snippets=snippets if request.return_snippets else [],
             commands_run=command_results,
             raw_reads_needed_by_parent=raw_reads,
-            uncertainties=[
+            uncertainties=self._truncation_uncertainties(documents[: request.max_files]) + [
                 "Correlate these findings with the raw log sections before deciding on a fix.",
             ],
             recommended_next_action=(
@@ -192,7 +195,9 @@ class DiscoveryService:
             small_snippets=snippets if request.return_snippets else [],
             commands_run=command_results,
             raw_reads_needed_by_parent=raw_reads,
-            uncertainties=["External docs and local docs may diverge; validate against the source of truth."],
+            uncertainties=self._truncation_uncertainties(documents[: request.max_files]) + [
+                "External docs and local docs may diverge; validate against the source of truth.",
+            ],
             recommended_next_action="Open the top raw doc candidates and cite the exact sections you will rely on.",
             confidence="medium" if candidate_files else "low",
         )
@@ -202,25 +207,40 @@ class DiscoveryService:
         documents: list[EvidenceDocument] = []
         for scope in request.scope_paths or ["."]:
             if scope.startswith(("http://", "https://")):
-                fetched = self._fetch_url(scope)
+                fetched, truncated = self._fetch_url(scope)
                 if fetched:
-                    documents.append(EvidenceDocument(path=scope, text=fetched, score=self._score_text(scope, fetched, terms)))
+                    documents.append(
+                        EvidenceDocument(
+                            path=scope,
+                            text=fetched,
+                            score=self._score_text(scope, fetched, terms),
+                            truncated=truncated,
+                        )
+                    )
                 continue
             path = Path(scope)
             if path.is_file():
-                text = self._read_text_file(path)
+                text, truncated = self._read_text_file(path)
                 if text:
-                    documents.append(EvidenceDocument(path=str(path), text=text, score=self._score_text(str(path), text, terms)))
+                    documents.append(
+                        EvidenceDocument(
+                            path=str(path),
+                            text=text,
+                            score=self._score_text(str(path), text, terms),
+                            truncated=truncated,
+                        )
+                    )
                 continue
             if path.is_dir():
                 for file_path in self._iter_text_files(path):
-                    text = self._read_text_file(file_path)
+                    text, truncated = self._read_text_file(file_path)
                     if text:
                         documents.append(
                             EvidenceDocument(
                                 path=str(file_path),
                                 text=text,
                                 score=self._score_text(str(file_path), text, terms),
+                                truncated=truncated,
                             )
                         )
         documents.sort(key=lambda item: item.score, reverse=True)
@@ -248,19 +268,39 @@ class DiscoveryService:
         lowered_name = path.name.lower()
         return lowered_name in TEXT_FILE_NAMES or lowered_name.startswith(".env")
 
-    def _read_text_file(self, path: Path) -> str:
+    def _read_text_file(self, path: Path) -> tuple[str, bool]:
         try:
-            return path.read_text(encoding="utf-8", errors="ignore")[:20000]
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                text = handle.read(TEXT_READ_LIMIT + 1)
+            truncated = len(text) > TEXT_READ_LIMIT
+            return text[:TEXT_READ_LIMIT], truncated
         except OSError:
-            return ""
+            return "", False
 
-    def _fetch_url(self, url: str) -> str:
+    def _fetch_url(self, url: str) -> tuple[str, bool]:
         try:
-            response = httpx.get(url, timeout=15.0, follow_redirects=True)
-            response.raise_for_status()
-            return response.text[:20000]
+            with httpx.stream("GET", url, timeout=HTTP_FETCH_TIMEOUT_SECONDS, follow_redirects=True) as response:
+                response.raise_for_status()
+                parts: list[str] = []
+                chars_read = 0
+                truncated = False
+                for chunk in response.iter_text():
+                    if not chunk:
+                        continue
+                    remaining = TEXT_READ_LIMIT - chars_read
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    if len(chunk) > remaining:
+                        parts.append(chunk[:remaining])
+                        chars_read += remaining
+                        truncated = True
+                        break
+                    parts.append(chunk)
+                    chars_read += len(chunk)
+                return "".join(parts), truncated
         except httpx.HTTPError:
-            return ""
+            return "", False
 
     def _score_text(self, path: str, text: str, terms: list[str]) -> float:
         if not terms:
@@ -492,3 +532,15 @@ class DiscoveryService:
             "en": "English",
             "it": "Italian",
         }.get(normalized, normalized)
+
+    def _truncation_uncertainties(self, documents: list[EvidenceDocument]) -> list[str]:
+        truncated_paths = [Path(doc.path).name if "://" not in doc.path else doc.path for doc in documents if doc.truncated]
+        if not truncated_paths:
+            return []
+        preview = ", ".join(truncated_paths[:3])
+        if len(truncated_paths) > 3:
+            preview += f" (+{len(truncated_paths) - 3} more)"
+        return [
+            f"Some sources were truncated to the first {TEXT_READ_LIMIT} characters: {preview}. "
+            "Read them raw before treating missing matches as evidence of absence."
+        ]
