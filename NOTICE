@@ -1,0 +1,13 @@
+headroom_agent_mcp
+Copyright 2026 headroom_agent_mcp contributors
+
+This repository is an independent overlay project designed to work with
+Headroom and OpenClaw.
+
+It references and is informed by the Apache-2.0 licensed Headroom project:
+https://github.com/headroomlabs-ai/headroom
+
+No affiliation, endorsement, or trademark license is claimed.
+
+This project keeps its own source tree, tests, prompts, and MCP server
+implementation separate from the upstream Headroom repository.

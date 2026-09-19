@@ -1,0 +1,25 @@
+defaults:
+  objective_type: codebase_discovery
+  command_allowlist_profile: safe_terminal
+  max_files: 12
+  max_commands: 6
+  raw_read_budget: 6
+  return_snippets: true
+  max_snippet_chars: 400
+profiles:
+  safe_readonly:
+    commands: []
+  safe_terminal:
+    commands:
+      - git status
+      - git diff --name-only
+      - ls
+      - find
+      - grep
+      - head
+      - tail
+      - cat
+      - pytest -q
+      - npm test
+      - pnpm test
+      - uv run pytest

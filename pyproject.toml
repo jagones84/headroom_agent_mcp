@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "headroom-agent-mcp"
+version = "0.1.0"
+description = "Goal-shaped discovery MCP server that can sit behind a Headroom-proxied LLM."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "TRAE" }]
+dependencies = [
+  "mcp>=1.1.0,<2",
+  "pydantic>=2.8.0",
+  "PyYAML>=6.0.2",
+  "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+]
+
+[project.scripts]
+headroom-agent-mcp = "headroom_agent_mcp.server:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
