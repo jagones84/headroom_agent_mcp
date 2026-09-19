@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from .websearch import (
 
 
 SKIP_DIR_NAMES = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
+FETCH_CONCURRENCY = 5
 TEXT_FILE_SUFFIXES = {
     ".md",
     ".txt",
@@ -221,13 +223,17 @@ class DiscoveryService:
         # return several pages per site and can serve the same URL twice.
         unique_results = dedupe_search_results(results)
 
+        # Fetches are independent, network-bound and the bulk of the latency, so
+        # they run concurrently. `map` preserves input order, which keeps the
+        # provider's own ranking as the tie-breaker before BM25 reranks.
+        fetched = self._fetch_many([result.url for result in unique_results])
+
         documents: list[EvidenceDocument] = []
         findings: list[str] = []
         ranked_text: list[str] = []
         seen_content: set[str] = set()
         content_duplicates = 0
-        for result in unique_results:
-            text, truncated = self._fetch_url(result.url)
+        for result, (text, truncated) in zip(unique_results, fetched):
             if not text:
                 text = result.snippet
                 truncated = False
@@ -410,6 +416,17 @@ class DiscoveryService:
         if len(text) > self.url_text_limit:
             return text[: self.url_text_limit], True
         return text, truncated
+
+    def _fetch_many(self, urls: list[str]) -> list[tuple[str, bool]]:
+        """Fetch several URLs concurrently, returning one result per URL in input order.
+
+        A single URL skips the pool entirely so the common one-result case has no
+        thread overhead.
+        """
+        if len(urls) <= 1:
+            return [self._fetch_url(url) for url in urls]
+        with ThreadPoolExecutor(max_workers=min(len(urls), FETCH_CONCURRENCY)) as pool:
+            return list(pool.map(self._fetch_url, urls))
 
     def _score_text(self, path: str, text: str, terms: list[str]) -> float:
         if not terms:

@@ -43,13 +43,14 @@
 - Suite locale dopo catena fallback websearch 2026-09-19 (sessione 3): `73 passed`
 - Suite locale dopo retry CCR metadata-only 2026-09-19 (sessione 4): `78 passed`
 - Suite locale dopo dedup + rerank BM25 websearch 2026-09-19 (sessione 5): `88 passed`
+- Suite locale dopo cache TTL + retry + fetch concorrente 2026-09-19 (sessione 6): `109 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
   - venv su `Z:` fallisce per esecuzione UNC/permessi
   - venv su `C:\Users\giova\.venvs\...` funziona
 - DGX:
-  - `scripts/run_tests_dgx.sh` -> `88 passed`
+  - `scripts/run_tests_dgx.sh` -> `109 passed`
   - `scripts/smoke_check_dgx.sh` -> `ok server=headroom_agent_mcp`
   - `scripts/smoke_openrouter_headroom_dgx.sh` -> risposta JSON valida di `codebase_discovery` con ranking file/simboli/snippet
 
@@ -210,6 +211,22 @@ Obiettivo: tenere ~75% di risparmio **senza** degradare il summary, dando al LLM
 - Trasparenza: i drop finiscono in `uncertainties` ("Dropped N duplicate search result(s)...", "Skipped N page(s) whose readable text duplicated an earlier source."), coerente con la politica F20/F22 "dichiara, non nascondere".
 - Test: 10 nuovi (domain_of, canonicalize, dedup URL, cap per dominio, fingerprint, BM25 ranking, BM25 length-normalization, BM25 query vuota, rerank+drop a livello servizio, skip contenuto duplicato) -> suite `88 passed` (Windows + DGX).
 - Verifica LIVE (`smoke_web_research_dgx.sh`, proxy CCR on): 5 fonti su 5 **domini distinti** (mem0.ai, langchain.com, zenml.io, zylos.ai, preprints.org), score BM25 decrescenti 4.60 / 4.29 / 4.07 / 2.95 / 2.37, `llm_enriched=true`, summary grounded. Nessun drop in questa run (uncertainties solo col cross-check generico).
+
+## Cache TTL + retry + fetch concorrente (2026-09-19, sessione 6)
+
+- Nuovo modulo `src/headroom_agent_mcp/cache.py`: `TTLCache`, cache su disco **fail-open** (una directory, un file JSON per chiave, `{"key","expires_at","value"}`; la chiave e' salvata nel file cosi' una collisione di hash non puo' restituire il valore di un'altra lookup). TTL 0 disabilita tutto. Scritture atomiche (`os.replace`). Ogni errore I/O = cache miss, mai eccezione: una run non deve dipendere dalla cache.
+- `websearch.py`:
+  - `get_cache()`/`reset_cache()`: singleton costruito dall'env al primo uso (`HEADROOM_AGENT_CACHE_DIR`, `HEADROOM_AGENT_CACHE_TTL_SECONDS`).
+  - `search_web()` cachea SOLO i successi non vuoti (chiave `search::{provider}::{limit}::{query lowercase}`); i fallimenti NON vengono cachati, cosi' un retry arriva davvero alla rete.
+  - `fetch_url_readable()` cachea per URL canonico (quindi `?utm_*#top` e `http/https` collassano).
+  - `_request_with_retries()`: 3 tentativi con backoff lineare, retry su `429/500/502/503/504` **e** su errori di trasporto, `Retry-After` rispettato e **cappato** (`RETRY_AFTER_MAX_SECONDS=5`) perche' un header ostile non deve bloccare il tool. Sorgenti: RFC 9110 §10.2.3 + Google API design guide (retry di errori transitori).
+  - `_stream_readable_with_retries()`: stesso treatment sul fetch, mantenendo la lettura a chunk (il cap di memoria non e' negoziabile). Un `404` NON viene ritentato. Se ogni tentativo fallisce si torna `("", False)` -> il chiamante ricade sullo snippet.
+  - `tavily_search_depth()`: `advanced` di default (piu' recall, piu' crediti), override `HEADROOM_AGENT_TAVILY_SEARCH_DEPTH=basic`; valori ignoti -> default. Sorgente: docs Tavily `/search`.
+- `service.py`: `_fetch_many()` con `ThreadPoolExecutor` (max 5, `FETCH_CONCURRENCY`). `pool.map` preserva l'ordine di input, quindi il ranking del provider resta il tie-breaker prima del rerank BM25. Con 0/1 URL il pool non viene creato.
+- Test: `tests/test_cache.py` (8) + 13 nuovi in `test_web_research.py` (retry su status/trasporto/budget/404-non-ritentato/Retry-After, depth Tavily, cache search hit+no-cache-sui-fallimenti, cache fetch per URL canonico, no-cache-fetch-fallito, ordine di `_fetch_many`, caso singolo/vuoto) + `tests/conftest.py` autouse che disabilita la cache su disco e resetta il singleton (nessun test scrive in `~/.headroom`).
+- Prova LIVE (`scripts/measure_websearch_dgx.sh`, nuovo): `search cold=4.82s -> warm=0.00s`; `fetch seq=1.71s -> concurrent=0.36s (4.7x) -> cached=0.05s`, con **testo identico** su tutti e tre i percorsi (`same_content=True`).
+- Smoke E2E via proxy CCR dopo le modifiche: retry metadata-only ancora attivo, `summary_chars=1274`, main request `before=13595 after=3652` (73%), `llm_enriched=true`, 5 domini distinti con BM25 7.13 / 4.57 / 4.20 / 2.34 / 1.62.
+- `.env.template` aggiornato: `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT=false` (era rimasto `true`, incoerente col default reale), `HEADROOM_AGENT_MAX_TOKENS`, `HEADROOM_AGENT_SEARCH_PROVIDER`, `HEADROOM_AGENT_TAVILY_SEARCH_DEPTH`, `HEADROOM_AGENT_CACHE_DIR`, `HEADROOM_AGENT_CACHE_TTL_SECONDS`, `BRAVE_API_KEY`, `TAVILY_API_KEY`.
 
 ## Prossimi step consigliati
 

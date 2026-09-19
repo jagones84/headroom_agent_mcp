@@ -5,12 +5,16 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlsplit
 
 import httpx
+
+from .cache import TTLCache
 
 SEARCH_TIMEOUT_SECONDS = 20.0
 FETCH_TIMEOUT_SECONDS = 20.0
@@ -24,6 +28,12 @@ DUCKDUCKGO_USER_AGENT = (
 DEFAULT_PROVIDER_ORDER = ("tavily", "brave", "duckduckgo")
 MAX_RESULTS_PER_DOMAIN = 2
 CONTENT_FINGERPRINT_CHARS = 400
+TAVILY_SEARCH_DEPTHS = ("basic", "advanced")
+TAVILY_DEFAULT_SEARCH_DEPTH = "advanced"
+RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+HTTP_MAX_ATTEMPTS = 3
+HTTP_BACKOFF_SECONDS = 0.5
+RETRY_AFTER_MAX_SECONDS = 5.0
 TRACKING_PARAM_PREFIXES = ("utm_",)
 TRACKING_PARAM_KEYS = {
     "fbclid",
@@ -90,9 +100,134 @@ class SearchResult:
     snippet: str
 
 
+_CACHE: TTLCache | None = None
+
+
+def get_cache() -> TTLCache:
+    """Return the process-wide cache, built from the environment on first use."""
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = TTLCache()
+    return _CACHE
+
+
+def reset_cache() -> None:
+    """Drop the cached instance so the next call re-reads the environment."""
+    global _CACHE
+    _CACHE = None
+
+
+class TransientStatusError(RuntimeError):
+    """A retryable HTTP status (429/5xx) that survived every attempt."""
+
+    def __init__(self, status_code: int, retry_after: float | None = None) -> None:
+        self.status_code = status_code
+        self.retry_after = retry_after
+        super().__init__(f"retryable HTTP status {status_code}")
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Read ``Retry-After`` in seconds, capped so a hostile header cannot stall the tool.
+
+    Source: RFC 9110 §10.2.3, https://www.rfc-editor.org/rfc/rfc9110#field.retry-after
+    (the HTTP-date form is deliberately ignored; only delay-seconds is honoured).
+    """
+    raw = str(response.headers.get("retry-after", "")).strip()
+    if not raw:
+        return None
+    try:
+        return min(max(float(raw), 0.0), RETRY_AFTER_MAX_SECONDS)
+    except ValueError:
+        return None
+
+
+def _retry_delay(retry_after: float | None, attempt: int) -> float:
+    """Prefer the server's ``Retry-After``, else linear backoff scaled by the attempt."""
+    if retry_after is not None:
+        return retry_after
+    return HTTP_BACKOFF_SECONDS * attempt
+
+
+def _request_with_retries(
+    method: str,
+    url: str,
+    *,
+    sleep: Callable[[float], None] | None = None,
+    **kwargs: object,
+) -> httpx.Response:
+    """Issue an HTTP request, retrying transient failures with backoff.
+
+    Search backends throttle bursts with 429/503 — DuckDuckGo's no-JS endpoint in
+    particular — and one dropped connection should not fail a whole discovery run.
+
+    Sources:
+    - RFC 9110 §10.2.3 Retry-After: https://www.rfc-editor.org/rfc/rfc9110#field.retry-after
+    - Google API design guide, retrying transient errors with backoff:
+      https://cloud.google.com/apis/design/errors#error_retries
+    """
+    sleeper = sleep or time.sleep
+    last_response: httpx.Response | None = None
+    last_error: httpx.TransportError | None = None
+    for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+        try:
+            response = httpx.request(method, url, **kwargs)  # type: ignore[arg-type]
+        except httpx.TransportError as exc:
+            last_error = exc
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                raise
+            sleeper(_retry_delay(None, attempt))
+            continue
+        if response.status_code in RETRY_STATUS_CODES:
+            last_response = response
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                raise TransientStatusError(response.status_code, _retry_after_seconds(response))
+            sleeper(_retry_delay(_retry_after_seconds(response), attempt))
+            continue
+        return response
+    if last_response is not None:
+        raise TransientStatusError(last_response.status_code, _retry_after_seconds(last_response))
+    raise last_error or RuntimeError("HTTP request failed")
+
+
+def _stream_readable(url: str) -> tuple[str, str, bool]:
+    """Single bounded streaming attempt: ``(raw_body, content_type, truncated)``.
+
+    The body is consumed in chunks so a multi-megabyte page never lands in memory
+    whole, and a retryable status is surfaced before any content is read.
+    """
+    with httpx.stream(
+        "GET",
+        url,
+        timeout=FETCH_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers={"User-Agent": USER_AGENT},
+    ) as response:
+        if response.status_code in RETRY_STATUS_CODES:
+            raise TransientStatusError(response.status_code, _retry_after_seconds(response))
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        parts: list[str] = []
+        chars_read = 0
+        truncated = False
+        for chunk in response.iter_text():
+            if not chunk:
+                continue
+            remaining = FETCH_MAX_CHARS - chars_read
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(chunk) > remaining:
+                parts.append(chunk[:remaining])
+                chars_read += remaining
+                truncated = True
+                break
+            parts.append(chunk)
+            chars_read += len(chunk)
+        return "".join(parts), content_type, truncated
+
+
 class _ReadableTextParser(HTMLParser):
     """Dependency-free fallback extractor that keeps visible block text."""
-
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._skip_depth = 0
@@ -147,52 +282,78 @@ def _looks_like_html(payload: str, content_type: str) -> bool:
     return "<html" in head or "<!doctype html" in head or "<body" in head
 
 
+def _stream_readable_with_retries(
+    url: str,
+    *,
+    sleep: Callable[[float], None] | None = None,
+) -> tuple[str, str, bool] | None:
+    """Stream a URL, retrying transport failures and retryable statuses.
+
+    Returns ``None`` when the page cannot be retrieved, so the caller can fall
+    back to the search snippet instead of failing the whole run.
+    """
+    sleeper = sleep or time.sleep
+    for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+        try:
+            return _stream_readable(url)
+        except TransientStatusError as exc:
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                return None
+            sleeper(_retry_delay(exc.retry_after, attempt))
+        except httpx.TransportError:
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                return None
+            sleeper(_retry_delay(None, attempt))
+        except httpx.HTTPError:
+            return None
+    return None
+
+
 def fetch_url_readable(url: str) -> tuple[str, bool]:
     """Fetch a URL and return its readable text plus a truncation flag.
 
     The byte cap protects memory; readability extraction happens before any
     preview limit so HTML `<head>` boilerplate never becomes the evidence.
+    Successful pages are cached by canonical URL, so re-running the same objective
+    does not re-pay for the download or repeat the extraction.
     """
-    try:
-        with httpx.stream(
-            "GET",
-            url,
-            timeout=FETCH_TIMEOUT_SECONDS,
-            follow_redirects=True,
-            headers={"User-Agent": USER_AGENT},
-        ) as response:
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            parts: list[str] = []
-            chars_read = 0
-            truncated = False
-            for chunk in response.iter_text():
-                if not chunk:
-                    continue
-                remaining = FETCH_MAX_CHARS - chars_read
-                if remaining <= 0:
-                    truncated = True
-                    break
-                if len(chunk) > remaining:
-                    parts.append(chunk[:remaining])
-                    chars_read += remaining
-                    truncated = True
-                    break
-                parts.append(chunk)
-                chars_read += len(chunk)
-            raw = "".join(parts)
-    except httpx.HTTPError:
-        return "", False
+    cache = get_cache()
+    cache_key = f"fetch::{canonicalize_url(url) or url}"
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict):
+        return str(cached.get("text", "")), bool(cached.get("truncated", False))
 
-    if _looks_like_html(raw, content_type):
-        return extract_readable_text(raw), truncated
-    return raw, truncated
+    streamed = _stream_readable_with_retries(url)
+    if streamed is None:
+        return "", False
+    raw, content_type, truncated = streamed
+    text = extract_readable_text(raw) if _looks_like_html(raw, content_type) else raw
+    cache.set(cache_key, {"text": text, "truncated": truncated})
+    return text, truncated
+
+
+def tavily_search_depth() -> str:
+    """Return the Tavily retrieval depth, defaulting to the higher-recall mode.
+
+    ``advanced`` returns more relevant chunks per result at a higher credit cost;
+    set ``HEADROOM_AGENT_TAVILY_SEARCH_DEPTH=basic`` to trade recall for credits.
+    Source: https://docs.tavily.com/documentation/api-reference/endpoint/search
+    """
+    depth = os.getenv("HEADROOM_AGENT_TAVILY_SEARCH_DEPTH", TAVILY_DEFAULT_SEARCH_DEPTH)
+    depth = depth.strip().lower()
+    return depth if depth in TAVILY_SEARCH_DEPTHS else TAVILY_DEFAULT_SEARCH_DEPTH
 
 
 def _search_tavily(query: str, limit: int, api_key: str) -> list[SearchResult]:
-    response = httpx.post(
+    response = _request_with_retries(
+        "POST",
         "https://api.tavily.com/search",
-        json={"api_key": api_key, "query": query, "max_results": limit, "search_depth": "basic"},
+        json={
+            "api_key": api_key,
+            "query": query,
+            "max_results": limit,
+            "search_depth": tavily_search_depth(),
+        },
         timeout=SEARCH_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
@@ -213,7 +374,8 @@ def _search_tavily(query: str, limit: int, api_key: str) -> list[SearchResult]:
 
 
 def _search_brave(query: str, limit: int, api_key: str) -> list[SearchResult]:
-    response = httpx.get(
+    response = _request_with_retries(
+        "GET",
         "https://api.search.brave.com/res/v1/web/search",
         params={"q": query, "count": limit},
         headers={"Accept": "application/json", "X-Subscription-Token": api_key},
@@ -289,7 +451,8 @@ class _DuckDuckGoParser(HTMLParser):
 
 def _search_duckduckgo(query: str, limit: int, api_key: str | None = None) -> list[SearchResult]:
     """Keyless DuckDuckGo fallback via the no-JS HTML endpoint."""
-    response = httpx.post(
+    response = _request_with_retries(
+        "POST",
         DUCKDUCKGO_ENDPOINT,
         data={"q": query},
         headers={"User-Agent": DUCKDUCKGO_USER_AGENT},
@@ -347,10 +510,22 @@ def resolve_search_provider(provider: str | None = None) -> str | None:
 
 
 def search_web(query: str, limit: int, provider: str | None = None) -> tuple[list[SearchResult], str | None]:
-    """Run a web search trying each provider in order and return (results, provider_used)."""
+    """Run a web search trying each provider in order and return (results, provider_used).
+
+    Successful result sets are cached, so repeating an objective inside the TTL
+    does not spend another search credit. Failures and empty result sets are not
+    cached: they are exactly the cases where a retry should reach the network.
+    """
     chain = resolve_search_chain(provider)
     if not chain:
         return [], None
+
+    cache = get_cache()
+    cache_key = f"search::{provider or 'auto'}::{limit}::{query.strip().lower()}"
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict) and cached.get("results"):
+        return [SearchResult(**item) for item in cached["results"]], cached.get("provider")
+
     failures: list[str] = []
     for name in chain:
         try:
@@ -364,6 +539,7 @@ def search_web(query: str, limit: int, provider: str | None = None) -> tuple[lis
             failures.append(f"{name}: {exc}")
             continue
         if results:
+            cache.set(cache_key, {"provider": name, "results": [asdict(item) for item in results]})
             return results, name
         failures.append(f"{name}: no results")
     if failures and all("no results" not in failure for failure in failures):

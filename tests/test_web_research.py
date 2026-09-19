@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
+from headroom_agent_mcp.cache import TTLCache
 from headroom_agent_mcp.config import HeadroomAgentConfig
 from headroom_agent_mcp.models import (
     CommandAllowlistProfile,
@@ -12,17 +14,23 @@ from headroom_agent_mcp.models import (
 )
 from headroom_agent_mcp.service import DiscoveryService, EvidenceDocument
 from headroom_agent_mcp.websearch import (
+    HTTP_MAX_ATTEMPTS,
     SearchResult,
+    TransientStatusError,
     _decode_duckduckgo_url,
     _DuckDuckGoParser,
+    _request_with_retries,
+    _search_tavily,
     bm25_scores,
     canonicalize_url,
     content_fingerprint,
     dedupe_search_results,
     domain_of,
     extract_readable_text,
+    fetch_url_readable,
     resolve_search_chain,
     search_web,
+    tavily_search_depth,
 )
 
 HTML_WITH_BOILERPLATE = (
@@ -406,3 +414,207 @@ def test_web_research_skips_pages_that_repeat_earlier_text(monkeypatch) -> None:
 
     assert [item.path for item in response.candidate_files] == ["https://one.example/a"]
     assert any("duplicated an earlier source" in item for item in response.uncertainties)
+
+
+def _response(status: int, *, retry_after: str | None = None, payload: dict | None = None) -> httpx.Response:
+    headers = {"retry-after": retry_after} if retry_after is not None else {}
+    return httpx.Response(
+        status,
+        headers=headers,
+        json=payload or {},
+        request=httpx.Request("GET", "https://example.com"),
+    )
+
+
+def test_request_with_retries_retries_a_retryable_status(monkeypatch) -> None:
+    queue = [_response(429, retry_after="0"), _response(200, payload={"ok": True})]
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "headroom_agent_mcp.websearch.httpx.request", lambda method, url, **kwargs: queue.pop(0)
+    )
+
+    response = _request_with_retries("GET", "https://example.com", sleep=slept.append)
+
+    assert response.status_code == 200
+    assert slept == [0.0]
+
+
+def test_request_with_retries_uses_backoff_when_retry_after_is_absent(monkeypatch) -> None:
+    queue = [_response(503), _response(200)]
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "headroom_agent_mcp.websearch.httpx.request", lambda method, url, **kwargs: queue.pop(0)
+    )
+
+    _request_with_retries("GET", "https://example.com", sleep=slept.append)
+
+    assert len(slept) == 1
+    assert slept[0] > 0
+
+
+def test_request_with_retries_raises_after_the_attempt_budget(monkeypatch) -> None:
+    attempts: list[int] = []
+    monkeypatch.setattr(
+        "headroom_agent_mcp.websearch.httpx.request",
+        lambda method, url, **kwargs: (attempts.append(1), _response(429))[1],
+    )
+
+    with pytest.raises(TransientStatusError):
+        _request_with_retries("GET", "https://example.com", sleep=lambda _seconds: None)
+
+    assert len(attempts) == HTTP_MAX_ATTEMPTS
+
+
+def test_request_with_retries_does_not_retry_a_client_error(monkeypatch) -> None:
+    attempts: list[int] = []
+    monkeypatch.setattr(
+        "headroom_agent_mcp.websearch.httpx.request",
+        lambda method, url, **kwargs: (attempts.append(1), _response(404))[1],
+    )
+
+    response = _request_with_retries("GET", "https://example.com", sleep=lambda _s: None)
+
+    assert response.status_code == 404
+    assert len(attempts) == 1
+
+
+def test_request_with_retries_retries_a_transport_error(monkeypatch) -> None:
+    attempts: list[int] = []
+
+    def flaky(method, url, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("connection reset")
+        return _response(200)
+
+    monkeypatch.setattr("headroom_agent_mcp.websearch.httpx.request", flaky)
+
+    response = _request_with_retries("GET", "https://example.com", sleep=lambda _s: None)
+
+    assert response.status_code == 200
+    assert len(attempts) == 2
+
+
+def test_tavily_search_depth_defaults_to_advanced_and_rejects_junk(monkeypatch) -> None:
+    monkeypatch.delenv("HEADROOM_AGENT_TAVILY_SEARCH_DEPTH", raising=False)
+    assert tavily_search_depth() == "advanced"
+
+    monkeypatch.setenv("HEADROOM_AGENT_TAVILY_SEARCH_DEPTH", "BASIC")
+    assert tavily_search_depth() == "basic"
+
+    monkeypatch.setenv("HEADROOM_AGENT_TAVILY_SEARCH_DEPTH", "turbo")
+    assert tavily_search_depth() == "advanced"
+
+
+def test_search_tavily_sends_the_configured_depth(monkeypatch) -> None:
+    captured: dict[str, dict] = {}
+
+    def fake_request(method, url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _response(200, payload={"results": []})
+
+    monkeypatch.setattr("headroom_agent_mcp.websearch._request_with_retries", fake_request)
+    monkeypatch.delenv("HEADROOM_AGENT_TAVILY_SEARCH_DEPTH", raising=False)
+
+    _search_tavily("query", 3, "key")
+    assert captured["json"]["search_depth"] == "advanced"
+    assert captured["json"]["max_results"] == 3
+
+
+def test_search_web_caches_successful_results(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.setattr("headroom_agent_mcp.websearch._CACHE", TTLCache(tmp_path, ttl_seconds=60))
+    calls: list[str] = []
+
+    def fake_tavily(query, limit, api_key):
+        calls.append(query)
+        return [SearchResult(title="Hit", url="https://example.com/a", snippet="s")]
+
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_tavily", fake_tavily)
+
+    first = search_web("Context Compression", 5)
+    second = search_web("context compression", 5)
+
+    assert len(calls) == 1
+    assert [item.url for item in second[0]] == ["https://example.com/a"]
+    assert second[1] == "tavily"
+    assert first[1] == second[1]
+
+
+def test_search_web_does_not_cache_failures(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.setattr("headroom_agent_mcp.websearch._CACHE", TTLCache(tmp_path, ttl_seconds=60))
+    attempts: list[int] = []
+
+    def failing(query, limit, api_key=None):
+        attempts.append(1)
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_tavily", failing)
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_duckduckgo", failing)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            search_web("query", 2)
+
+    assert len(attempts) == 4
+
+
+def test_fetch_url_readable_caches_by_canonical_url(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("headroom_agent_mcp.websearch._CACHE", TTLCache(tmp_path, ttl_seconds=60))
+    fetched: list[str] = []
+
+    def fake_stream(url):
+        fetched.append(url)
+        return ("<html><body><p>Hello cached page</p></body></html>", "text/html", False)
+
+    monkeypatch.setattr("headroom_agent_mcp.websearch._stream_readable", fake_stream)
+
+    first = fetch_url_readable("https://www.example.com/page/?utm_source=news")
+    second = fetch_url_readable("http://example.com/page")
+
+    assert first == second
+    assert "Hello cached page" in first[0]
+    assert len(fetched) == 1
+
+
+def test_fetch_url_readable_does_not_cache_failures(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("headroom_agent_mcp.websearch._CACHE", TTLCache(tmp_path, ttl_seconds=60))
+    attempts: list[int] = []
+
+    def failing(url):
+        attempts.append(1)
+        raise httpx.ConnectError("connection reset by peer")
+
+    monkeypatch.setattr("headroom_agent_mcp.websearch._stream_readable", failing)
+    monkeypatch.setattr("headroom_agent_mcp.websearch.time.sleep", lambda _seconds: None)
+
+    assert fetch_url_readable("https://example.com/x") == ("", False)
+    assert fetch_url_readable("https://example.com/x") == ("", False)
+    assert len(attempts) == 2 * HTTP_MAX_ATTEMPTS
+
+
+def test_fetch_many_preserves_input_order() -> None:
+    service = DiscoveryService(llm_evidence_char_budget=12000)
+    seen: list[str] = []
+
+    def fake_fetch(url: str) -> tuple[str, bool]:
+        seen.append(url)
+        return f"body of {url}", False
+
+    service._fetch_url = fake_fetch  # type: ignore[method-assign]
+
+    urls = [f"https://example.com/{index}" for index in range(5)]
+    results = service._fetch_many(urls)
+
+    assert [text for text, _ in results] == [f"body of {url}" for url in urls]
+    assert sorted(seen) == sorted(urls)
+
+
+def test_fetch_many_handles_the_single_url_case() -> None:
+    service = DiscoveryService(llm_evidence_char_budget=12000)
+    service._fetch_url = lambda url: (f"only {url}", True)  # type: ignore[method-assign]
+
+    assert service._fetch_many(["https://example.com/one"]) == [("only https://example.com/one", True)]
+    assert service._fetch_many([]) == []

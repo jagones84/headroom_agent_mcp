@@ -74,6 +74,12 @@ Both forms are valid, so existing callers keep working:
 - pages whose readable text repeats an earlier source are skipped (mirrors/syndications), keyed on a normalized 400-char prefix
 - survivors are **reranked with Okapi BM25** over title + body (zero dependencies): term frequency saturates, length is normalized, and each query term is IDF-weighted — so a short on-topic page outranks a long padded one
 - drops are always declared in `uncertainties`, never silent
+- the surviving pages are **fetched concurrently** (up to `5` in flight), so five sources cost roughly one round-trip instead of five
+- the search call and each fetched page are **cached on disk with a TTL**, keyed on the canonical URL / normalized query: repeating an objective inside the window costs no search credit and no re-download. Only successes are cached — failures and empty result sets always go back to the network
+- search and fetch calls **retry transient failures** (`429`, `5xx`, transport errors) with backoff, honouring `Retry-After`; a page that never resolves falls back to its search snippet instead of failing the run
+
+Measured on the DGX (`scripts/measure_websearch_dgx.sh`), 5 sources:
+`search 4.82s -> 0.00s` (cache) · `fetch 1.71s -> 0.36s` (concurrent, 4.7x) `-> 0.05s` (cache), with byte-identical readable text across all three paths.
 
 Output highlights:
 - `relevant_findings`
@@ -179,6 +185,9 @@ Copy `.env.template` to `.env` or export the variables in your runtime:
 - `HEADROOM_AGENT_LLM_EVIDENCE_CHARS` (raw evidence characters handed to the delegated LLM; default `12000`, `40000` when `HEADROOM_PROXY_URL` is set)
 - `BRAVE_API_KEY` / `TAVILY_API_KEY` (keyed web search backends; `web_research` always keeps the keyless `duckduckgo` fallback)
 - `HEADROOM_AGENT_SEARCH_PROVIDER` (optional; pins which search provider is tried first)
+- `HEADROOM_AGENT_TAVILY_SEARCH_DEPTH` (`advanced` by default; set `basic` to trade recall for credits)
+- `HEADROOM_AGENT_CACHE_TTL_SECONDS` (search + page cache TTL, default `3600`; `0` disables the cache entirely)
+- `HEADROOM_AGENT_CACHE_DIR` (cache location; defaults to `~/.headroom/agent_cache`, i.e. outside the repository)
 
 If `HEADROOM_PROXY_URL` is set, the configured LLM profile routes through it, the evidence budget and the request timeout grow, and the proxy compresses the subagent's own prompt before it reaches the provider.
 
@@ -319,6 +328,7 @@ DGX smoke scripts:
 - `scripts/probe_ccr_retrieval_dgx.sh` (does the proxy resolve `headroom_retrieve` under a given response format?)
 - `scripts/inspect_proxy_jsonl_dgx.py` (reads the official `--log-file` JSONL and the `/stats` CCR counters)
 - `scripts/measure_ccr_retrieval_dgx.sh` (CCR counters before/after one `web_research` call)
+- `scripts/measure_websearch_dgx.sh` (cold vs warm cache and sequential vs concurrent fetch timings)
 
 DGX Headroom proxy runtime:
 
@@ -353,7 +363,7 @@ Implemented:
 - safe terminal policy
 - deterministic discovery service
 - optional OpenAI-compatible LLM enrichment
-- web search (`tavily` / `brave` / keyless `duckduckgo`) with readability extraction, provider fallback, URL/content dedup and BM25 reranking
+- web search (`tavily` / `brave` / keyless `duckduckgo`) with readability extraction, provider fallback, URL/content dedup, BM25 reranking, concurrent fetches, disk TTL cache and retry-with-backoff
 - MCP server and CLI smoke check
 
 Not implemented:
