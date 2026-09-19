@@ -133,6 +133,12 @@ LLM enrichment behavior:
 - LLM failures are exposed in the response via `llm_error` and logged to `stderr` without corrupting the stdio MCP stream
 - zero-score candidates are now labeled as fallback candidates instead of claiming keyword overlap that did not happen
 
+Provider selection:
+- the active default LLM backend is chosen by `HEADROOM_AGENT_MODEL_PROVIDER`
+- the provider-specific settings come from the matching env values such as `HEADROOM_AGENT_MODEL_NAME` and `HEADROOM_AGENT_BASE_URL`
+- the MCP caller can override the default per request by passing `model_profile`
+- the current `config/config.yaml` only defines command profiles and request defaults; the default repo setup builds the active LLM profile from env
+
 Current retrieval behavior:
 - directory scans collect standard source/docs/log files by suffix
 - directory scans also collect common config files by name, including `.env`, `.env.template`, `Dockerfile`, `Makefile`, and `Procfile`
@@ -143,9 +149,75 @@ Launchers:
 - Unix/Linux launcher: `scripts/headroom_agent_stdio_unix.sh`
 - DGX compatibility shim: `scripts/openclaw_stdio_dgx.sh`
 
+## MCP JSON Templates
+
+Trae / Windows, use the repo `.env` as the source of truth:
+
+```json
+{
+  "mcpServers": {
+    "headroom_agent_discovery": {
+      "type": "STDIO",
+      "description": "Headroom Agent MCP discovery server",
+      "command": "python",
+      "args": [
+        "Z:\\Repositories\\headroom_agent_mcp\\scripts\\headroom_agent_stdio_windows.py"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+Trae / Windows, force the fast Windows IQ4 backend directly from MCP config:
+
+```json
+{
+  "mcpServers": {
+    "headroom_agent_discovery": {
+      "type": "STDIO",
+      "description": "Headroom Agent MCP discovery server (Windows IQ4 backend)",
+      "command": "python",
+      "args": [
+        "Z:\\Repositories\\headroom_agent_mcp\\scripts\\headroom_agent_stdio_windows.py"
+      ],
+      "env": {
+        "HEADROOM_AGENT_MODEL_PROVIDER": "local",
+        "HEADROOM_AGENT_MODEL_NAME": "nex-n2.5-mini-uncensored-iq4xs",
+        "HEADROOM_AGENT_BASE_URL": "http://192.168.1.11:8080/v1",
+        "HEADROOM_AGENT_REQUIRE_API_KEY": "false",
+        "HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT": "false",
+        "HEADROOM_AGENT_TIMEOUT_SECONDS": "45"
+      }
+    }
+  }
+}
+```
+
+If `env` is empty, the launcher loads the repo `.env` and that file decides the active provider.
+If `env` contains provider variables, the MCP host overrides the repo defaults for that process.
+
 ## OpenClaw Example
 
 Add a server entry like the example in `config/openclaw.headroom_agent_mcp.example.json`.
+
+OpenClaw / Linux:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "headroom_agent_discovery": {
+        "enabled": true,
+        "command": "/home/jagones/Repositories/headroom_agent_mcp/scripts/headroom_agent_stdio_unix.sh",
+        "args": [],
+        "cwd": "/home/jagones/Repositories/headroom_agent_mcp",
+        "connectionTimeoutMs": 120000
+      }
+    }
+  }
+}
+```
 
 For Windows hosts, use `config/windows.stdio.headroom_agent_mcp.example.json`.
 

@@ -87,6 +87,7 @@
   - F9 migliorato: `small_snippets` non si fermano piu' alla prima occorrenza nel file; ora espongono piu' regioni rilevanti dello stesso file (utile sui file multi-`except`)
   - F9 migliorato ancora: la fusione degli snippet salta solo le finestre interamente coperte (`end <= covered_until`) e il cap per file sale fino a 5 snippet; il caso denso da 5 `except` resta coperto
   - lingua output LLM irrigidita: il prompt impone di rispondere nella stessa lingua dell'obiettivo/summary esistenti, fallback English se ambiguo
+  - README riallineato alla configurazione reale: ora documenta inline i template MCP JSON per Trae/Windows e OpenClaw/Linux, piu' la regola esplicita su chi decide il provider attivo (`HEADROOM_AGENT_MODEL_PROVIDER` vs override `model_profile`)
   - residui NON affrontati in questo passaggio:
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)
