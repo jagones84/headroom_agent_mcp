@@ -313,13 +313,11 @@ class DiscoveryService:
         return symbols
 
     def _build_snippets(self, documents: list[EvidenceDocument], request: DiscoveryRequest) -> list[SmallSnippet]:
-        snippets: list[SmallSnippet] = []
         terms = self._search_terms(request)
         snippet_limit = min(max(request.raw_read_budget * 2, 1), 8)
         per_doc_limit = min(5, snippet_limit)
+        snippets_by_doc: list[list[SmallSnippet]] = []
         for doc in documents[: request.raw_read_budget]:
-            if len(snippets) >= snippet_limit:
-                break
             lines = doc.text.splitlines()
             matched_indices = [
                 index
@@ -328,6 +326,7 @@ class DiscoveryService:
             ] or [0]
             covered_until = -1
             snippets_for_doc = 0
+            doc_snippets: list[SmallSnippet] = []
             for matched_index in matched_indices:
                 start = max(matched_index - 2, 0)
                 end = min(matched_index + 3, len(lines))
@@ -336,7 +335,7 @@ class DiscoveryService:
                 snippet = "\n".join(lines[start:end])[: self.request_defaults.max_snippet_chars]
                 if not snippet.strip():
                     continue
-                snippets.append(
+                doc_snippets.append(
                     SmallSnippet(
                         path=doc.path,
                         snippet=snippet,
@@ -345,8 +344,24 @@ class DiscoveryService:
                 )
                 covered_until = end
                 snippets_for_doc += 1
-                if len(snippets) >= snippet_limit or snippets_for_doc >= per_doc_limit:
+                if snippets_for_doc >= per_doc_limit:
                     break
+            if doc_snippets:
+                snippets_by_doc.append(doc_snippets)
+
+        snippets: list[SmallSnippet] = []
+        round_index = 0
+        while len(snippets) < snippet_limit:
+            appended_in_round = False
+            for doc_snippets in snippets_by_doc:
+                if round_index < len(doc_snippets):
+                    snippets.append(doc_snippets[round_index])
+                    appended_in_round = True
+                    if len(snippets) >= snippet_limit:
+                        break
+            if not appended_in_round:
+                break
+            round_index += 1
         return snippets
 
     def _build_grounded_doc_findings(
@@ -355,9 +370,11 @@ class DiscoveryService:
         snippets: list[SmallSnippet],
     ) -> list[str]:
         findings: list[str] = []
-        snippet_by_path = {snippet.path: snippet.snippet for snippet in snippets}
+        snippet_by_path: dict[str, list[str]] = {}
+        for snippet in snippets:
+            snippet_by_path.setdefault(snippet.path, []).append(snippet.snippet)
         for doc in documents[: min(4, len(documents))]:
-            snippet = snippet_by_path.get(doc.path, "").strip()
+            snippet = "\n".join(snippet_by_path.get(doc.path, [])).strip()
             if snippet:
                 snippet_lines = [line.strip() for line in snippet.splitlines() if line.strip()]
                 first_line = next((line for line in snippet_lines if not line.startswith("#")), "")
@@ -418,13 +435,14 @@ class DiscoveryService:
     ) -> DiscoveryResponse:
         payload = response.model_dump()
         grounded_evidence = self._format_llm_evidence(response)
+        response_language = self._language_instruction(request.response_language)
         try:
             llm_json = self.llm_client.complete_json(
                 model_profile,
                 system_prompt=(
                     "You are a discovery subagent. Keep the output concise, evidence-driven, and never claim edits were made. "
                     "Use only the provided evidence. Do not invent files, symbols, environment variables, commands, stack traces, or tools. "
-                    "Respond in the same language as the user's objective and existing summary; if unclear, respond in English. "
+                    f"Respond in {response_language}. This output-language instruction overrides any language suggested by the objective, summary, or evidence. "
                     "Return JSON with optional keys: summary, recommended_next_action, confidence."
                 ),
                 user_prompt=(
@@ -467,3 +485,10 @@ class DiscoveryService:
         if not evidence_lines:
             return "(no grounded evidence collected)"
         return "\n---\n".join(evidence_lines)
+
+    def _language_instruction(self, response_language: str) -> str:
+        normalized = response_language.strip().lower()
+        return {
+            "en": "English",
+            "it": "Italian",
+        }.get(normalized, normalized)

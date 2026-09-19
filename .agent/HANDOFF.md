@@ -79,6 +79,7 @@
   - F17 chiuso: le scansioni di directory raccolgono ora anche file di configurazione senza suffisso standard come `.env`, `.env.template`, `Dockerfile`, `Makefile`, `Procfile`
   - F18 chiuso: `terminal_commands` vengono ora eseguiti con la stessa policy anche in `codebase_discovery` e `docs_research`; non spariscono piu' in `commands_run`
   - grounding fix aggiuntivo: l'LLM vede ora `candidate_files` + `candidate_symbols` + `small_snippets` + finding meccanici nel prompt, e non puo' piu' sovrascrivere `relevant_findings` con allucinazioni
+  - lingua output LLM resa esplicita nel contratto: `DiscoveryRequest.response_language` con default `en`; il prompt usa questa scelta invece di inferirla dall'obiettivo
   - LLM hardening aggiuntivo:
     - `api_key_env` ora puo' essere `null` per endpoint locali keyless
     - `require_api_key` configurabile per profilo/env
@@ -86,13 +87,14 @@
     - `timeout_seconds` per profilo finalmente applicato davvero dal client HTTP
   - F9 migliorato: `small_snippets` non si fermano piu' alla prima occorrenza nel file; ora espongono piu' regioni rilevanti dello stesso file (utile sui file multi-`except`)
   - F9 migliorato ancora: la fusione degli snippet salta solo le finestre interamente coperte (`end <= covered_until`) e il cap per file sale fino a 5 snippet; il caso denso da 5 `except` resta coperto
-  - lingua output LLM irrigidita: il prompt impone di rispondere nella stessa lingua dell'obiettivo/summary esistenti, fallback English se ambiguo
+  - fairness snippet migliorata: il budget globale viene distribuito round-robin tra i top documenti, cosi' un file denso non prosciuga tutta l'evidenza disponibile
+  - lingua output LLM irrigidita: il prompt usa `response_language`; default English, override esplicito del caller quando serve
   - README riallineato alla configurazione reale: ora documenta inline i template MCP JSON per Trae/Windows e OpenClaw/Linux, piu' la regola esplicita su chi decide il provider attivo (`HEADROOM_AGENT_MODEL_PROVIDER` vs override `model_profile`)
   - residui NON affrontati in questo passaggio:
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)
     - esercizio automatico del proxy Headroom nel wrapper DGX (`F13`)
-  - suite locale dopo fix caso G + vincolo lingua LLM: `34 passed`
+  - suite locale dopo `response_language` esplicito + fairness round-robin snippet: `36 passed`
 
 ## Prossimi step consigliati
 

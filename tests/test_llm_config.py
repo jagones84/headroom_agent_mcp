@@ -169,7 +169,7 @@ def test_service_passes_grounded_evidence_to_llm_and_keeps_mechanical_findings(t
     assert any("terminal.py" in finding for finding in response.relevant_findings)
 
 
-def test_service_tells_llm_to_answer_in_the_same_language_as_the_objective(tmp_path: Path) -> None:
+def test_service_defaults_llm_output_language_to_english(tmp_path: Path) -> None:
     target = tmp_path / "README.md"
     target.write_text("Configurazione: MCP_ENDPOINT e MCP_TOKEN.\n", encoding="utf-8")
     llm_client = _FakeLLMClient()
@@ -184,7 +184,26 @@ def test_service_tells_llm_to_answer_in_the_same_language_as_the_objective(tmp_p
 
     service.run(request)
 
-    assert "same language" in llm_client.system_prompts[0].lower()
+    assert "respond in english" in llm_client.system_prompts[0].lower()
+
+
+def test_service_honors_explicit_response_language_for_llm(tmp_path: Path) -> None:
+    target = tmp_path / "README.md"
+    target.write_text("Configurazione: MCP_ENDPOINT e MCP_TOKEN.\n", encoding="utf-8")
+    llm_client = _FakeLLMClient()
+    service = DiscoveryService(llm_client=llm_client, default_model_profile="openrouter")
+    request = DiscoveryRequest(
+        objective="Cosa c'e' qui?",
+        objective_type=ObjectiveType.DOCS_RESEARCH,
+        scope_paths=[str(tmp_path)],
+        query_hints=["MCP_ENDPOINT", "MCP_TOKEN"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        response_language="it",
+    )
+
+    service.run(request)
+
+    assert "respond in it" in llm_client.system_prompts[0].lower()
 
 
 def test_config_from_sources_loads_yaml_defaults_profiles_and_slug_model(tmp_path: Path) -> None:

@@ -67,6 +67,7 @@ class DiscoveryRequest(BaseModel):
     return_snippets: bool = True
     raw_read_budget: int = Field(default=4, ge=1, le=20)
     model_profile: str | None = None
+    response_language: str = Field(default="en", min_length=1)
 
     @field_validator("objective")
     @classmethod
@@ -74,6 +75,14 @@ class DiscoveryRequest(BaseModel):
         if not value.strip():
             raise ValueError("objective must not be blank")
         return value
+
+    @field_validator("response_language")
+    @classmethod
+    def validate_response_language(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("response_language must not be blank")
+        return normalized
 
 
 class DiscoveryResponse(BaseModel):

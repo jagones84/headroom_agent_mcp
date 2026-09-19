@@ -226,3 +226,61 @@ def test_codebase_discovery_snippets_keep_all_exception_regions_in_dense_file(tm
     combined_snippets = "\n".join(snippet.snippet for snippet in response.small_snippets if snippet.path.endswith("service.py"))
     for exception_name in ("ValueError", "TypeError", "OverflowError", "KeyError", "IndexError"):
         assert f"except {exception_name}" in combined_snippets
+
+
+def test_codebase_discovery_distributes_snippet_budget_across_top_documents(tmp_path: Path) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "multi.py").write_text(
+        "def parse_many() -> int:\n"
+        "    try:\n"
+        "        return load_a()\n"
+        "    except ValueError:\n"
+        "        return 0\n"
+        "    except TypeError:\n"
+        "        return 1\n"
+        "    except OverflowError:\n"
+        "        return 2\n"
+        "    except KeyError:\n"
+        "        return 3\n"
+        "    except IndexError:\n"
+        "        return 4\n",
+        encoding="utf-8",
+    )
+    (app_dir / "service.py").write_text(
+        "def read_config() -> str:\n"
+        "    try:\n"
+        "        return load()\n"
+        "    except OSError:\n"
+        "        return 'missing'\n"
+        "\n"
+        "def parse_payload() -> str:\n"
+        "    try:\n"
+        "        return parse()\n"
+        "    except ValueError:\n"
+        "        return 'bad'\n",
+        encoding="utf-8",
+    )
+    request = DiscoveryRequest(
+        objective="Find all handled exceptions in service parsing",
+        objective_type=ObjectiveType.CODEBASE_DISCOVERY,
+        scope_paths=[str(app_dir)],
+        query_hints=["except", "ValueError", "TypeError", "OverflowError", "KeyError", "IndexError", "OSError"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=3,
+        raw_read_budget=3,
+    )
+
+    response = DiscoveryService().run(request)
+
+    snippets_by_path = {
+        Path(snippet.path).name: "\n".join(
+            item.snippet for item in response.small_snippets if Path(item.path).name == Path(snippet.path).name
+        )
+        for snippet in response.small_snippets
+    }
+    assert "multi.py" in snippets_by_path
+    assert "service.py" in snippets_by_path
+    assert "except IndexError" in snippets_by_path["multi.py"]
+    assert "except OSError" in snippets_by_path["service.py"]
+    assert "except ValueError" in snippets_by_path["service.py"]

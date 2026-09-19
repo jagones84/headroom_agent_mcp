@@ -41,6 +41,7 @@ Input highlights:
 - `query_hints`: extra terms to bias search
 - `terminal_commands`: optional tokenized safe commands like `["git", "status"]`
 - `command_allowlist_profile`: `safe_readonly` or `safe_terminal`
+- `response_language`: optional output language for LLM enrichment; default `en`
 
 Output highlights:
 - `relevant_findings`
@@ -130,6 +131,7 @@ For local OpenAI-compatible endpoints:
 
 LLM enrichment behavior:
 - if an LLM profile exists and the caller does not pass `model_profile`, the server falls back to the configured default profile
+- the caller can force the enrichment output language with `response_language`; default is `en`
 - LLM failures are exposed in the response via `llm_error` and logged to `stderr` without corrupting the stdio MCP stream
 - zero-score candidates are now labeled as fallback candidates instead of claiming keyword overlap that did not happen
 
@@ -142,6 +144,7 @@ Provider selection:
 Current retrieval behavior:
 - directory scans collect standard source/docs/log files by suffix
 - directory scans also collect common config files by name, including `.env`, `.env.template`, `Dockerfile`, `Makefile`, and `Procfile`
+- snippet budget is now distributed across top documents in rounds, so one dense file does not starve the rest of the evidence set
 
 Launchers:
 - Windows stable launcher: `scripts/headroom_agent_stdio_windows.py`
