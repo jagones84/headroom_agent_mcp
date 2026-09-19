@@ -118,7 +118,20 @@ How the evidence is framed matters more than the proxy itself. The delegated LLM
 
 Headroom routes JSON arrays to `SmartCrusher`, which keeps first/last, error and query-relevant items and drops the rest. Prose in the same position barely compresses, and a payload with fewer than ~10 items has nothing to discard. That is why the service emits sections, not a text blob.
 
-End to end on `web_research` (5 readable sources, 12,938-token subagent prompt): the proxy reports `tokens_saved=4,847`, `savings_percent=41.8` with `--no-ccr`, and `72.5%` when CCR is enabled. CCR mode is off by default here: the delegated LLM has no retrieval tool, so injected `headroom_retrieve` markers only invite it to ask for content it cannot fetch, which measurably degraded the answer. Enable it with `HEADROOM_PROXY_CCR=1` when the caller does have the Headroom retrieval tools.
+Compression is reversible, and the client does not have to implement the retrieval. With CCR enabled the proxy injects the `headroom_retrieve` tool, the delegated model calls it when it needs a block back, and the proxy resolves the call server-side before returning a final answer:
+
+> "When the LLM calls `headroom_retrieve` [...] Response Handler intercepts the tool call [...] Continues the API call automatically. **The client never sees CCR tool calls — they're handled transparently.**"
+
+Source: upstream `wiki/ccr.md` (CCR Phase 3, shipped with `headroom-ai`).
+
+Verified end to end on the DGX (`scripts/measure_ccr_retrieval_dgx.sh`): during a single `web_research` call the proxy reported `toin.total_retrievals` going `0 -> 1` and `ccr_retrievals` `42 -> 48`, while the delegated prompt shrank `13,991 -> 3,499` tokens (**75.0%**) and the returned summary stayed fully grounded.
+
+Two knobs matter for that result:
+
+- **Do not force `response_format`.** Forcing `{"type": "json_object"}` made the model echo the compressed table instead of answering. The service now asks for a JSON object through the prompt and parses a fenced or prose-wrapped body (`extract_json_object`). Set `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT=true` only for providers you have verified.
+- **Set `max_tokens`.** DeepSeek documents that JSON Output "may occasionally return empty content" and asks callers to "set the `max_tokens` parameter reasonably to prevent the JSON string from being truncated midway" (<https://api-docs.deepseek.com/guides/json_mode>).
+
+`--no-ccr` remains available for callers that cannot tolerate a retrieval round trip or want the conservative single-shot mode (`scripts/headroom_proxy_service_dgx.sh start-no-ccr`).
 
 ## Quick Start
 
@@ -153,7 +166,8 @@ Copy `.env.template` to `.env` or export the variables in your runtime:
 - `HEADROOM_AGENT_API_KEY_ENV` (optional alternate env var name for auth)
 - `HEADROOM_AGENT_API_KEY`
 - `HEADROOM_AGENT_REQUIRE_API_KEY` (`true` by default; set `false` for local keyless endpoints)
-- `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT` (`true` by default; set `false` for OpenAI-compatible servers that reject `response_format`)
+- `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT` (`false` by default; forcing `json_object` made the delegated model echo compressed evidence instead of answering — see the proxy section)
+- `HEADROOM_AGENT_MAX_TOKENS` (default `2048`; DeepSeek asks for a reasonable cap to avoid a JSON body truncated midway)
 - `HEADROOM_PROXY_URL` (optional)
 - `HEADROOM_AGENT_TIMEOUT_SECONDS` (default `45`; `120` when `HEADROOM_PROXY_URL` is set, because compression adds latency)
 - `HEADROOM_AGENT_LLM_EVIDENCE_CHARS` (raw evidence characters handed to the delegated LLM; default `12000`, `40000` when `HEADROOM_PROXY_URL` is set)
@@ -175,7 +189,9 @@ For local OpenAI-compatible endpoints:
 LLM enrichment behavior:
 - if an LLM profile exists and the caller does not pass `model_profile`, the server falls back to the configured default profile
 - the caller can force the enrichment output language with `response_language`; default is `en`
+- the response body is parsed tolerantly (markdown fence or surrounding prose), so a provider that wraps its JSON still works
 - LLM failures are exposed in the response via `llm_error` and logged to `stderr` without corrupting the stdio MCP stream
+- a response with no text content reports the upstream `finish_reason` and any tool calls, instead of an opaque `NoneType` error
 - zero-score candidates are now labeled as fallback candidates instead of claiming keyword overlap that did not happen
 
 Provider selection:
@@ -293,12 +309,15 @@ DGX smoke scripts:
 - `scripts/smoke_openrouter_headroom_dgx.sh`
 - `scripts/smoke_web_research_dgx.sh` (`web_research` end to end, prints proxy savings)
 - `scripts/probe_proxy_framings_dgx.sh` (payload-framing compression benchmark)
+- `scripts/probe_ccr_retrieval_dgx.sh` (does the proxy resolve `headroom_retrieve` under a given response format?)
+- `scripts/inspect_proxy_jsonl_dgx.py` (reads the official `--log-file` JSONL and the `/stats` CCR counters)
+- `scripts/measure_ccr_retrieval_dgx.sh` (CCR counters before/after one `web_research` call)
 
 DGX Headroom proxy runtime:
 
 - `scripts/setup_headroom_runtime_dgx.sh` (Linux venv for the `headroom` repo + `headroom-ai[proxy]`)
 - `scripts/setup_headroom_ml_dgx.sh` (adds `headroom-ai[ml]`, the Kompress ML compressor)
-- `scripts/headroom_proxy_service_dgx.sh` `{start|stop|status}` (proxy on `127.0.0.1:8788`)
+- `scripts/headroom_proxy_service_dgx.sh` `{start|start-trace|start-no-ccr|stop|status}` (proxy on `127.0.0.1:8788`; `start` keeps CCR on, `start-trace` also logs full messages)
 - `scripts/headroom_proxy_stats.py` (one-line savings summary)
 - `scripts/wire_openclaw_headroom_dgx.py` (registers the official `headroom` MCP + `HEADROOM_PROXY_URL` in `~/.openclaw/openclaw.json`)
 
@@ -333,4 +352,3 @@ Implemented:
 Not implemented:
 - write/edit tools
 - automatic child-process orchestration inside OpenClaw
-- a retrieval tool for the delegated LLM (which is why CCR is off by default on the proxy)

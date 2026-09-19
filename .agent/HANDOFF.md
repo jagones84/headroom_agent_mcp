@@ -39,13 +39,14 @@
 - Suite locale dopo fix F23 (snippet centrati sul match) 2026-09-19: `41 passed`
 - Suite locale dopo fix F10 (logs_triage) + F16 (argomenti piatti) 2026-09-19: `49 passed`
 - Suite locale dopo `web_research` + evidenza JSON compressa 2026-09-19: `61 passed`
+- Suite locale dopo retrieval CCR + hardening client LLM 2026-09-19 (sessione 2): `66 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
   - venv su `Z:` fallisce per esecuzione UNC/permessi
   - venv su `C:\Users\giova\.venvs\...` funziona
 - DGX:
-  - `scripts/run_tests_dgx.sh` -> `61 passed`
+  - `scripts/run_tests_dgx.sh` -> `66 passed`
   - `scripts/smoke_check_dgx.sh` -> `ok server=headroom_agent_mcp`
   - `scripts/smoke_openrouter_headroom_dgx.sh` -> risposta JSON valida di `codebase_discovery` con ranking file/simboli/snippet
 
@@ -132,9 +133,40 @@ Manual operativo completo: `.agent/README-headroom-proxy.md` (leggere quello pri
   - MCP ufficiale `headroom` registrato in `~/.openclaw/openclaw.json` (`3 tools`) + `HEADROOM_PROXY_URL` nell'env del nostro MCP (`1 tools`)
 - Misure reali (dettaglio in `.agent/README-headroom-proxy.md`):
   - framing prose -> 4.5% di token risparmiati; JSON con >=10 item -> ~74%; JSON con 5 item -> 0%
-  - `web_research` E2E: `before=12938 after=8091 saved=4847` -> **41.8%** con `llm_enriched=true` e summary ricco
-  - con CCR attivo: 72.5% ma il summary peggiora ("retrieve the full compressed excerpts") -> CCR resta OFF di default
+  - `web_research` E2E senza CCR: `before=12938 after=8091 saved=4847` -> **41.8%** con `llm_enriched=true` e summary ricco
+  - con CCR attivo (proxy di default) il retrieval lato server ora funziona: vedi sezione "Retrieval CCR + hardening client LLM" qui sotto (75.0% senza degradare il summary)
   - i nomi tool `WebSearch`/`WebFetch`/`web_search`/`web_fetch` sono in `DEFAULT_VERBATIM_EXCLUDE_TOOLS` di Headroom e non vengono mai compressi in modo lossy: non usare quei nomi per l'evidenza
+
+## Retrieval CCR + hardening client LLM (2026-09-19, sessione 2)
+
+Obiettivo: tenere ~75% di risparmio **senza** degradare il summary, dando al LLM delegato la possibilita' di recuperare l'evidenza compressa (`headroom_retrieve`) invece di lamentarsi di excerpt mancanti.
+
+- Fonti ufficiali usate (grounding, non ipotesi):
+  - `headroom/wiki/ccr.md`: "The client never sees CCR tool calls - they're handled transparently." -> il retrieval e' risolto **lato proxy**, niente loop client-side
+  - `headroom/wiki/ARCHITECTURE.md` (CCR Phase 2 `/v1/retrieve`, Phase 3 tool injection, Phase 5 response handler `headroom/ccr/response_handler.py`, max 3 round di continuazione)
+  - `headroom/proxy/handlers/openai.py` -> `_should_inject_openai_chat_ccr_tool` => `bool(ccr_inject_tool and not stream)`: lo streaming NON puo' redimere il tool
+  - `https://api-docs.deepseek.com/guides/json_mode` -> con `response_format` serve "json" nel prompt, `max_tokens` adeguato per non troncare a meta' JSON, il content puo' tornare vuoto
+  - `https://openrouter.ai/docs/features/structured-outputs`
+- Assunzione SBAGLIATA corretta in questa sessione:
+  - nella sessione 1 avevo concluso che servisse un loop di retrieval client-side e quindi tenevo `--no-ccr`. Falso: i contatori ufficiali provano che il proxy risolve il retrieval da solo. Ora **CCR e' ON di default** e non esiste alcun loop client-side.
+- Bug di root cause trovato col probe (`scripts/probe_ccr_retrieval_dgx.py`):
+  - forzando `response_format={"type":"json_object"}` sull'evidenza compressa in forma tabellare, il modello restituiva `content: null` sul wire e poi un echo di 2.539 char della tabella invece di rispondere. Il client crashava con `'NoneType' object has no attribute 'strip'`.
+- Fix applicati:
+  - `src/headroom_agent_mcp/config.py`: `supports_json_response_format` default `True` -> `False`; nuovo `max_tokens: int = 2048`; env `HEADROOM_AGENT_USE_JSON_RESPONSE_FORMAT` (default `False`) e `HEADROOM_AGENT_MAX_TOKENS` (default `2048`)
+  - `src/headroom_agent_mcp/llm.py`: nuovo `extract_json_object()` (tollera fence markdown e prosa attorno), invio sempre di `max_tokens`, `response_format` solo su opt-in, guard esplicito su content vuoto con `finish_reason` + nomi tool
+  - `src/headroom_agent_mcp/service.py`: system prompt ora incorpora la forma JSON letterale e dice di chiamare il retrieval tool se disponibile, senza mai narrare la compressione
+  - `tests/test_llm_config.py`: 5 nuovi test (fence, prosa, payload non-oggetto, `max_tokens` presente + `response_format` assente di default, opt-in che lo mantiene)
+- Runtime proxy (script-driven, CCR default):
+  - `scripts/headroom_proxy_service_dgx.sh` azioni: `start` (= CCR on), `start-trace` (`--log-messages`), `start-no-ccr`, `stop`, `status`
+  - sempre `--log-file ~/.headroom/proxy.jsonl` (JSONL ufficiale con `request_messages`, `response_content`)
+  - `HEADROOM_TARGET_RATIO` (default 0.5) per `--target-ratio`
+- Prove misurate:
+  - retrieval risolto lato proxy: `stats[toin].total_retrievals` `0 -> 1`, `stats[compression].ccr_retrievals` `42 -> 48`
+  - smoke finale con CCR on: `before=13991 after=3499 saved=10492` -> **75.0%**, `llm_enriched=true`, summary grounded
+  - trace: `transforms_applied=["router:mixed:0.18"]`, 40 marker `<<ccr:>>`, `optimization_latency_ms=2768`, `total_latency_ms=43631`
+- Gotcha:
+  - in `proxy.jsonl` il campo `request_messages` registra i messaggi **prima** dell'iniezione del tool: `retrieve_tool=0` li' NON significa che il tool non sia stato iniettato
+  - nuovi script diagnostici: `scripts/inspect_proxy_jsonl_dgx.py`, `scripts/measure_ccr_retrieval_dgx.sh`, `scripts/probe_ccr_retrieval_dgx.{py,sh}`
 
 ## Prossimi step consigliati
 

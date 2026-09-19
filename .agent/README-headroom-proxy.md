@@ -29,11 +29,19 @@ the noisy web payload never enters its context.
 3. **Never** name the evidence tool `WebSearch`, `WebFetch`, `web_search` or `web_fetch`:
    those are in Headroom's `DEFAULT_VERBATIM_EXCLUDE_TOOLS`, so their output bypasses lossy
    compression entirely.
-4. Keep CCR **off** for this subagent (`--no-ccr`, i.e. `HEADROOM_PROXY_CCR=0`, the default).
-   The delegated LLM has no retrieval tool, so injected `headroom_retrieve` markers make it
-   narrate "let me retrieve the full content" instead of answering.
-5. The request timeout must exceed the compression latency: 120s with the proxy, not 45s.
-6. Restart the proxy after installing anything into the `headroom` venv. Kompress health is
+4. Keep **CCR on** (default) and let the proxy run the retrieval loop. Per upstream
+   `wiki/ccr.md` "*The client never sees CCR tool calls — they're handled transparently*":
+   the proxy injects `headroom_retrieve`, the model calls it, the proxy resolves it and
+   continues the turn. **Do not write a client-side retrieve loop.**
+5. **Never force `response_format: json_object`.** Measured: with it set, the delegated model
+   echoed the compressed table back instead of answering (`content` came back `null` on the
+   wire, then a 2,539-char echo of the evidence). Ask for JSON in the prompt and parse
+   tolerantly instead (`extract_json_object`).
+6. Always send `max_tokens`: upstream DeepSeek documents that JSON Output "may occasionally
+   return empty content" (<https://api-docs.deepseek.com/guides/json_mode>), and an unbounded
+   body can be cut mid-JSON.
+7. The request timeout must exceed the compression latency: 120s with the proxy, not 45s.
+8. Restart the proxy after installing anything into the `headroom` venv. Kompress health is
    reconciled at startup.
 
 ## Layout (DGX = `Z:` from the Windows host)
@@ -43,6 +51,8 @@ the noisy web payload never enters its context.
 | Upstream repo | `/home/jagones/Repositories/headroom` |
 | Headroom venv (proxy + MCP live here) | `/home/jagones/Repositories/headroom/.venv` |
 | Proxy log | `~/.headroom/proxy.log` |
+| Proxy request log (JSONL) | `~/.headroom/proxy.jsonl` |
+| CCR store (retrieval cache) | `~/.headroom/ccr_store.db` |
 | Proxy pid | `~/.headroom/proxy.pid` |
 | Our repo / subagent venv | `/home/jagones/Repositories/headroom_agent_mcp`, `~/.venvs/headroom_agent_mcp` |
 | OpenClaw config | `~/.openclaw/openclaw.json` (timestamped backups next to it) |
@@ -68,19 +78,32 @@ Traps already hit here (do not repeat):
 ## Operate
 
 ```bash
-bash scripts/headroom_proxy_service_dgx.sh start | stop | status
+bash scripts/headroom_proxy_service_dgx.sh start | start-trace | start-no-ccr | stop | status
 bash scripts/headroom_proxy_stats.py http://127.0.0.1:8788/stats
 ```
 
-`HEADROOM_PROXY_TARGET_RATIO` (default `0.5`) and `HEADROOM_PROXY_CCR` (default `0`, meaning
-`--no-ccr`) are read by the service script. Measured: `HEADROOM_TARGET_RATIO` has **no effect**
-on the `router:mixed` path, so it did not reduce the compression ratio.
+- `start` — the live default: CCR on, `--log-file ~/.headroom/proxy.jsonl`.
+- `start-trace` — CCR on **plus** `--log-messages`, so the JSONL carries
+  `request_messages` / `response_content`. Use it to see what the model actually received.
+  It logs prompt content, so treat the file as sensitive.
+- `start-no-ccr` — conservative single-shot mode, no retrieval round trip.
+
+Two official flags in the JSONL that answer "did the model retrieve?":
+
+- `transforms_applied` — e.g. `["router:mixed:0.18"]`, the compression strategy and ratio.
+- `request_messages` — the compressed blocks with `<<ccr:hash,...>>` markers.
+
+`HEADROOM_PROXY_TARGET_RATIO` (default `0.5`) and `HEADROOM_PROXY_CCR` (default `1`) are read by
+the service script. Measured: `HEADROOM_TARGET_RATIO` has **no effect** on the `router:mixed`
+path, so it did not reduce the compression ratio.
 
 ## Verify
 
 ```bash
 bash scripts/smoke_web_research_dgx.sh          # web_research end to end + proxy savings
 bash scripts/probe_proxy_framings_dgx.sh        # framing benchmark (prose vs JSON N items)
+bash scripts/probe_ccr_retrieval_dgx.sh         # CCR behaviour with/without response_format
+bash scripts/measure_ccr_retrieval_dgx.sh       # CCR counters before/after one smoke run
 bash scripts/openclaw_reload_probe_dgx.sh       # openclaw mcp doctor/reload/probe
 ```
 
@@ -97,12 +120,27 @@ Framing benchmark (real chat path through the proxy):
 | JSON, 10 items | 3,067 | 808 | 73.7% |
 | JSON, 30 items | 9,187 | 2,368 | 74.2% |
 
+Response-format probe (same 30-item payload, `probe_ccr_retrieval_dgx.sh`):
+
+| Request | finish_reason | content | result |
+| --- | --- | --- | --- |
+| `response_format=json_object` | `stop`, no tool call | 2,539 chars | **echoed the compressed table**, no answer |
+| no `response_format` | `stop`, no tool call | 919 chars | proper JSON summary |
+
 `web_research`, 5 readable sources, one delegated call:
 
-- `--no-ccr` (default): `before=12,938 after=8,091 saved=4,847` → **41.8%**, `llm_enriched=true`,
-  rich grounded summary (named strategies, 3.70 vs 3.35/3.44 scores, 26–54%, 95%+).
-- CCR enabled: `before=13,235 after=3,890 saved=9,345` → **72.5%**, but the summary degraded
-  and ended with "retrieve the full compressed excerpts".
+- CCR on (live default): `before=13,991 after=3,499 saved=10,492` → **75.0%**, `llm_enriched=true`,
+  grounded summary naming the strategies and their numbers.
+- Same run traced (`start-trace`): `transforms_applied=["router:mixed:0.18"]`, 40 `<<ccr:>>`
+  markers in the request, `optimization_latency_ms=2768`, `total_latency_ms=43631` — the extra
+  ~40s is the retrieval round trip.
+- CCR proof: `toin.total_retrievals` `0 -> 1` and `compression.ccr_retrievals` `42 -> 48`
+  across that single call, i.e. the proxy did resolve a `headroom_retrieve` call.
+- CCR off (`start-no-ccr`): `before=12,938 after=8,091 saved=4,847` → 41.8%, also a good answer,
+  but a single upstream round trip.
+- Forcing `response_format=json_object` with CCR on: the client raised
+  `LLM returned no text content (finish_reason='stop', tool_calls=[...])` because the upstream
+  content was `null` — this is the failure that rule 5 removes.
 
 ## Rollback
 
