@@ -74,7 +74,9 @@
   - F4 fixato: `config/config.yaml` ora alimenta davvero `defaults` e `profiles`
   - F5 fixato: default modello/documentazione allineati a `deepseek/deepseek-v4-flash`
   - F6 fixato in modo sostanziale: esclusi artefatti `.egg-info`, `dist`, `build`, `.pytest_cache`; scoring passato da sottostringhe grezze a tokenizzazione normalizzata
+  - F6 chiuso meglio nel passaggio finale: i candidati con `score=0` non dichiarano piu' falso "keyword overlap", ma vengono marcati come fallback espliciti
   - F8 fixato: `candidate_symbols` limitato ai file effettivamente esposti in `candidate_files`
+  - F17 chiuso: le scansioni di directory raccolgono ora anche file di configurazione senza suffisso standard come `.env`, `.env.template`, `Dockerfile`, `Makefile`, `Procfile`
   - grounding fix aggiuntivo: l'LLM vede ora `candidate_files` + `candidate_symbols` + `small_snippets` + finding meccanici nel prompt, e non puo' piu' sovrascrivere `relevant_findings` con allucinazioni
   - LLM hardening aggiuntivo:
     - `api_key_env` ora puo' essere `null` per endpoint locali keyless

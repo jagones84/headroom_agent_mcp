@@ -41,6 +41,13 @@ TEXT_FILE_SUFFIXES = {
     ".toml",
     ".sh",
 }
+TEXT_FILE_NAMES = {
+    ".env",
+    ".env.template",
+    "dockerfile",
+    "makefile",
+    "procfile",
+}
 
 
 @dataclass
@@ -95,16 +102,17 @@ class DiscoveryService:
         documents = self._collect_documents(request)
         candidate_documents = documents[: request.max_files]
         candidate_files = [
-            CandidateFile(path=doc.path, reason="High keyword overlap with objective", score=round(doc.score, 2))
+            CandidateFile(path=doc.path, reason=self._candidate_reason(doc.score), score=round(doc.score, 2))
             for doc in candidate_documents
         ]
         candidate_symbols = self._extract_symbols(candidate_documents)
         snippets = self._build_snippets(documents, request)
         findings = [
-            f"{Path(doc.path).name}: matched discovery terms with score {round(doc.score, 2)}"
+            self._candidate_finding(doc)
             for doc in documents[: min(4, len(documents))]
         ]
         raw_reads = [item.path for item in candidate_files[: request.raw_read_budget]]
+        has_keyword_match = any(doc.score > 0 for doc in candidate_documents)
         return DiscoveryResponse(
             summary=(
                 f"Found {len(candidate_files)} candidate files for '{request.objective}'. "
@@ -123,7 +131,7 @@ class DiscoveryService:
             recommended_next_action=(
                 "Open the top raw_reads_needed_by_parent files raw, then patch only after confirming the exact symbol."
             ),
-            confidence="medium" if candidate_files else "low",
+            confidence="medium" if has_keyword_match else "low",
         )
 
     def _run_logs_triage(self, request: DiscoveryRequest) -> DiscoveryResponse:
@@ -137,7 +145,11 @@ class DiscoveryService:
         documents = self._collect_documents(request)
         findings = self._extract_error_findings(documents, command_results, request.query_hints)
         candidate_files = [
-            CandidateFile(path=doc.path, reason="Contains log/error evidence", score=round(doc.score, 2))
+            CandidateFile(
+                path=doc.path,
+                reason=self._candidate_reason(doc.score, "Contains log/error evidence"),
+                score=round(doc.score, 2),
+            )
             for doc in documents[: request.max_files]
         ]
         raw_reads = [item.path for item in candidate_files[: request.raw_read_budget]]
@@ -165,7 +177,11 @@ class DiscoveryService:
     def _run_docs_research(self, request: DiscoveryRequest) -> DiscoveryResponse:
         documents = self._collect_documents(request)
         candidate_files = [
-            CandidateFile(path=doc.path, reason="Relevant documentation hit", score=round(doc.score, 2))
+            CandidateFile(
+                path=doc.path,
+                reason=self._candidate_reason(doc.score, "Relevant documentation hit"),
+                score=round(doc.score, 2),
+            )
             for doc in documents[: request.max_files]
         ]
         snippets = self._build_snippets(documents, request)
@@ -224,11 +240,17 @@ class DiscoveryService:
         for path in root.rglob("*"):
             if self._should_skip_path(path):
                 continue
-            if path.is_file() and path.suffix.lower() in TEXT_FILE_SUFFIXES:
+            if path.is_file() and self._is_text_path(path):
                 yield path
 
     def _should_skip_path(self, path: Path) -> bool:
         return any(part in SKIP_DIR_NAMES or part.endswith(".egg-info") for part in path.parts)
+
+    def _is_text_path(self, path: Path) -> bool:
+        if path.suffix.lower() in TEXT_FILE_SUFFIXES:
+            return True
+        lowered_name = path.name.lower()
+        return lowered_name in TEXT_FILE_NAMES or lowered_name.startswith(".env")
 
     def _read_text_file(self, path: Path) -> str:
         try:
@@ -255,6 +277,16 @@ class DiscoveryService:
             score += path_terms.count(term) * 3
             score += (text_terms.count(term) * 100.0) / text_weight
         return score
+
+    def _candidate_reason(self, score: float, matched_reason: str = "High keyword overlap with objective") -> str:
+        if score > 0:
+            return matched_reason
+        return "No keyword match; included as a best-effort fallback candidate."
+
+    def _candidate_finding(self, doc: EvidenceDocument) -> str:
+        if doc.score > 0:
+            return f"{Path(doc.path).name}: matched discovery terms with score {round(doc.score, 2)}"
+        return f"{Path(doc.path).name}: fallback candidate with no exact keyword match"
 
     def _extract_symbols(self, documents: list[EvidenceDocument]) -> list[CandidateSymbol]:
         symbols: list[CandidateSymbol] = []

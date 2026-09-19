@@ -104,10 +104,12 @@ For local OpenAI-compatible endpoints:
 `config/config.yaml` is live:
 - `defaults` are applied when the caller omits optional request fields like `max_files`, `max_commands`, `raw_read_budget`, `return_snippets`, and `command_allowlist_profile`
 - `profiles` define the allowed tokenized command prefixes for each command profile
+- directory scans also collect common config files without standard suffixes, such as `.env`, `.env.template`, `Dockerfile`, `Makefile`, and `Procfile`
 
 LLM enrichment behavior:
 - if an LLM profile exists and the caller does not pass `model_profile`, the server falls back to the configured default profile
 - LLM failures are exposed in the response via `llm_error` and logged to `stderr` without corrupting the stdio MCP stream
+- zero-score candidates are now labeled as fallback candidates instead of claiming keyword overlap that did not happen
 
 Launchers:
 - Windows stable launcher: `scripts/headroom_agent_stdio_windows.py`

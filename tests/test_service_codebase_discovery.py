@@ -101,3 +101,26 @@ def test_codebase_discovery_applies_config_defaults_when_request_omits_them(tmp_
 
     assert len(response.candidate_files) == 1
     assert response.raw_reads_needed_by_parent == [response.candidate_files[0].path]
+
+
+def test_codebase_discovery_marks_zero_score_candidates_as_fallbacks(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "alpha.py").write_text("def alpha() -> str:\n    return 'a'\n", encoding="utf-8")
+    (src_dir / "beta.py").write_text("def beta() -> str:\n    return 'b'\n", encoding="utf-8")
+    request = DiscoveryRequest(
+        objective="Find payment reconciliation pipeline",
+        objective_type=ObjectiveType.CODEBASE_DISCOVERY,
+        scope_paths=[str(tmp_path)],
+        query_hints=["payment", "reconciliation", "ledger"],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=2,
+    )
+
+    response = DiscoveryService().run(request)
+
+    assert response.candidate_files
+    assert all(item.score == 0 for item in response.candidate_files)
+    assert all("overlap" not in item.reason.lower() for item in response.candidate_files)
+    assert all("fallback" in item.reason.lower() or "no keyword match" in item.reason.lower() for item in response.candidate_files)
