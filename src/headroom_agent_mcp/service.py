@@ -50,6 +50,13 @@ TEXT_FILE_NAMES = {
 }
 TEXT_READ_LIMIT = 20_000
 HTTP_FETCH_TIMEOUT_SECONDS = 15.0
+TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "specs"}
+MAX_LOG_FINDINGS = 8
+SEVERITY_RANK_PATTERNS = (
+    (re.compile(r"\b(error|critical|fatal|exception|traceback|fail|failed|timeout)\b", re.IGNORECASE), 0),
+    (re.compile(r"\b(warn|warning)\b", re.IGNORECASE), 1),
+    (re.compile(r"\b(info|debug|notice|verbose)\b", re.IGNORECASE), 2),
+)
 
 
 @dataclass
@@ -141,7 +148,11 @@ class DiscoveryService:
     def _run_logs_triage(self, request: DiscoveryRequest) -> DiscoveryResponse:
         command_results = self._run_terminal_commands(request)
         documents = self._collect_documents(request)
-        findings = self._extract_error_findings(documents, command_results, request.query_hints)
+        production_documents = [doc for doc in documents if not self._is_test_path(doc.path)]
+        documents = production_documents or documents
+        findings = self._rank_and_dedupe_findings(
+            self._extract_error_findings(documents, command_results, request.query_hints)
+        )
         candidate_files = [
             CandidateFile(
                 path=doc.path,
@@ -450,7 +461,40 @@ class DiscoveryService:
             findings.append(f"{Path(doc.path).name}: {heading or 'top document candidate'}")
         return findings
 
-    def _extract_error_findings(self, documents: list[EvidenceDocument], command_results, query_hints: list[str]) -> list[str]:
+    @staticmethod
+    def _is_test_path(path: str) -> bool:
+        """Treat fixture/test directories as non-production evidence for log triage."""
+        if "://" in path:
+            return False
+        return any(part.lower() in TEST_DIR_NAMES for part in Path(path).parts)
+
+    @staticmethod
+    def _severity_rank(text: str) -> int:
+        """Return a lower rank for more severe log lines."""
+        for pattern, rank in SEVERITY_RANK_PATTERNS:
+            if pattern.search(text):
+                return rank
+        return len(SEVERITY_RANK_PATTERNS)
+
+    def _rank_and_dedupe_findings(self, findings: list[str], limit: int = MAX_LOG_FINDINGS) -> list[str]:
+        """Deduplicate findings and surface the most severe ones first."""
+        seen: set[str] = set()
+        unique: list[str] = []
+        for finding in findings:
+            key = finding.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(finding)
+        return sorted(unique, key=self._severity_rank)[:limit]
+
+    def _extract_error_findings(
+        self,
+        documents: list[EvidenceDocument],
+        command_results,
+        query_hints: list[str],
+        limit: int = MAX_LOG_FINDINGS * 5,
+    ) -> list[str]:
         findings: list[str] = []
         hint_terms = [hint.lower() for hint in query_hints if hint.strip()]
         for doc in documents:
@@ -460,7 +504,7 @@ class DiscoveryService:
                     hint_terms and any(term in lower for term in hint_terms)
                 ):
                     findings.append(f"{Path(doc.path).name}: {line.strip()}")
-                    if len(findings) >= 8:
+                    if len(findings) >= limit:
                         return findings
         for result in command_results:
             combined = "\n".join(filter(None, [result.stdout, result.stderr]))
@@ -470,7 +514,7 @@ class DiscoveryService:
                     hint_terms and any(term in lower for term in hint_terms)
                 ):
                     findings.append(f"{' '.join(result.command)}: {line.strip()}")
-                    if len(findings) >= 8:
+                    if len(findings) >= limit:
                         return findings
         return findings
 

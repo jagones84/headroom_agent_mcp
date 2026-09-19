@@ -44,6 +44,22 @@ Input highlights:
 - `command_allowlist_profile`: `safe_readonly` or `safe_terminal`
 - `response_language`: optional output language for LLM enrichment; default `en`
 
+The tool accepts the fields either **flat** (recommended) or bundled inside a legacy `params` object.
+Both forms are valid, so existing callers keep working:
+
+```json
+{ "objective": "Find the auth check", "objective_type": "codebase_discovery", "scope_paths": ["src/"] }
+```
+
+```json
+{ "params": { "objective": "Find the auth check", "objective_type": "codebase_discovery" } }
+```
+
+`logs_triage` extra behavior:
+- test/fixture directories (`tests`, `test`, `__tests__`, `spec`, `specs`) are ignored when real logs exist
+- findings are deduplicated and ordered by severity (error > warning > info)
+- if the caller explicitly scopes a single file inside a test directory, it is still honored
+
 Output highlights:
 - `relevant_findings`
 - `candidate_files`

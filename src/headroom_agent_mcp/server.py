@@ -9,8 +9,57 @@ from mcp.server.fastmcp import FastMCP
 
 from .config import HeadroomAgentConfig
 from .llm import OpenAICompatibleLLMClient
-from .models import DiscoveryRequest
+from .models import CommandAllowlistProfile, DiscoveryRequest, ObjectiveType
 from .service import DiscoveryService
+
+
+def build_discovery_request(
+    *,
+    params: DiscoveryRequest | dict | None = None,
+    objective: str | None = None,
+    objective_type: ObjectiveType | str | None = None,
+    scope_paths: list[str] | None = None,
+    query_hints: list[str] | None = None,
+    terminal_commands: list[list[str]] | None = None,
+    command_allowlist_profile: CommandAllowlistProfile | str | None = None,
+    max_files: int | None = None,
+    max_commands: int | None = None,
+    return_snippets: bool | None = None,
+    raw_read_budget: int | None = None,
+    model_profile: str | None = None,
+    response_language: str | None = None,
+) -> DiscoveryRequest:
+    """Build a discovery request from flat tool arguments or a nested `params` payload.
+
+    `params` keeps backward compatibility with clients (including the OpenClaw runtime)
+    that still send the nested envelope. Flat arguments are the friendlier path for agents
+    that pass tool arguments directly.
+    """
+    if params is not None:
+        return params if isinstance(params, DiscoveryRequest) else DiscoveryRequest.model_validate(params)
+
+    flat_values = {
+        "objective": objective,
+        "objective_type": objective_type,
+        "scope_paths": scope_paths,
+        "query_hints": query_hints,
+        "terminal_commands": terminal_commands,
+        "command_allowlist_profile": command_allowlist_profile,
+        "max_files": max_files,
+        "max_commands": max_commands,
+        "return_snippets": return_snippets,
+        "raw_read_budget": raw_read_budget,
+        "model_profile": model_profile,
+        "response_language": response_language,
+    }
+    provided = {key: value for key, value in flat_values.items() if value is not None}
+    missing = [key for key in ("objective", "objective_type") if key not in provided]
+    if missing:
+        raise ValueError(
+            "run_discovery requires either `params` or the flat fields "
+            f"{', '.join(missing)}. Provide a nested `params` payload or the flat arguments."
+        )
+    return DiscoveryRequest(**provided)
 
 
 def create_server(config_path: str | Path | None = None) -> FastMCP:
@@ -35,12 +84,28 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
             "openWorldHint": False,
         },
     )
-    def run_discovery(params: DiscoveryRequest) -> dict:
+    def run_discovery(
+        params: DiscoveryRequest | None = None,
+        objective: str | None = None,
+        objective_type: ObjectiveType | None = None,
+        scope_paths: list[str] | None = None,
+        query_hints: list[str] | None = None,
+        terminal_commands: list[list[str]] | None = None,
+        command_allowlist_profile: CommandAllowlistProfile | None = None,
+        max_files: int | None = None,
+        max_commands: int | None = None,
+        return_snippets: bool | None = None,
+        raw_read_budget: int | None = None,
+        model_profile: str | None = None,
+        response_language: str | None = None,
+    ) -> dict:
         """Explore noisy docs, logs, or codebases and return only the evidence a parent agent needs.
 
         Use this tool when the parent agent needs discovery or triage before reading raw files itself.
         Best cases: docs research, logs/output triage, or codebase discovery over broad scopes.
         Do not use it for final file edits or precise patch generation.
+
+        Call it either with flat arguments (recommended) or with the legacy nested `params` envelope.
 
         Inputs:
         - objective: concrete question or goal for this run
@@ -49,14 +114,31 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
           local files and direct URL fetches are inspected with a bounded preview budget
         - query_hints: optional extra terms to bias search/scoring
         - terminal_commands: optional tokenized safe commands, e.g. [["git","status"],["pytest","-q"]]
+        - params: optional legacy envelope containing the same fields as a single object
 
         Notes:
         - large files and fetched URLs are truncated to a bounded preview instead of being read fully into memory
         - when truncation happens, the response surfaces it through `uncertainties`
         - snippets are excerpted around the matched column, so long single-line sources still contain the matched term
+        - in `logs_triage`, test/fixture directories are ignored when real logs exist, and findings are ranked by severity
         """
 
-        return service.run(params).model_dump()
+        request = build_discovery_request(
+            params=params,
+            objective=objective,
+            objective_type=objective_type,
+            scope_paths=scope_paths,
+            query_hints=query_hints,
+            terminal_commands=terminal_commands,
+            command_allowlist_profile=command_allowlist_profile,
+            max_files=max_files,
+            max_commands=max_commands,
+            return_snippets=return_snippets,
+            raw_read_budget=raw_read_budget,
+            model_profile=model_profile,
+            response_language=response_language,
+        )
+        return service.run(request).model_dump()
 
     return mcp
 

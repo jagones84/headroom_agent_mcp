@@ -7,4 +7,5 @@ VENV_DIR="$HOME/.venvs/headroom_agent_mcp"
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
 "$VENV_DIR/bin/python" -m pip install -e "$ROOT_DIR[dev]" >/dev/null
-"$VENV_DIR/bin/python" -m pytest "$ROOT_DIR/tests" -q
+cd "$ROOT_DIR"
+"$VENV_DIR/bin/python" -m pytest tests -q

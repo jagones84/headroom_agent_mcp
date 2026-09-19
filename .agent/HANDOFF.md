@@ -37,6 +37,7 @@
 - Suite TDD locale aggiornata dopo grounding fix + LLM hardening 2026-09-19: `27 passed`
 - Suite locale finale dopo hardening large-file / bounded-fetch 2026-09-19: `38 passed`
 - Suite locale dopo fix F23 (snippet centrati sul match) 2026-09-19: `41 passed`
+- Suite locale dopo fix F10 (logs_triage) + F16 (argomenti piatti) 2026-09-19: `49 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
@@ -98,11 +99,14 @@
   - F23 chiuso: gli snippet non sono piu' tagliati dal solo prefisso del blocco; la finestra e' centrata sulla colonna del match, quindi su sorgenti a riga lunga (JS minificato, JSON su una riga, CSV/log a riga singola) l'evidenza contiene davvero il termine cercato invece di essere muta
   - F23 verificato con 3 regressioni: needle in fondo a riga lunga, JSON minificato su una riga, e caso multi-riga normale che resta invariato (nessun marcatore di ellissi)
   - residui NON affrontati in questo passaggio:
-    - fixture test trattate come log reali (`F10`)
-    - analisi istanze multiple lato host (`F12`)
-    - esercizio automatico del proxy Headroom nel wrapper DGX (`F13`)
+    - analisi istanze multiple lato host (`F12`): dopo `mcp reload` osservata una sola istanza; resta nota operativa, non difetto di codice
+    - esercizio automatico del proxy Headroom (`F13`): `HEADROOM_PROXY_URL` non e' impostato nel launcher stdio live, quindi il percorso proxy non e' esercitato in produzione
+  - F10 chiuso: in `logs_triage` i path di test/fixture (`tests`, `test`, `__tests__`, `spec`, `specs`) vengono ignorati quando esistono log reali; i findings sono deduplicati e ordinati per severita' (error > warning > info); uno scope esplicito su un singolo file di test resta rispettato
+  - F16 chiuso: il tool `run_discovery` accetta ora anche argomenti piatti (`objective`, `objective_type`, `scope_paths`, ...) mantenendo `params` come busta retro-compatibile, cosi' OpenClaw e i client esistenti continuano a funzionare
+  - `scripts/run_tests_dgx.sh` ora fa `cd "$ROOT_DIR"` prima di pytest: senza quel `cd` i 4 test smoke con path relativi fallivano a torto
   - suite locale dopo `response_language` esplicito + fairness round-robin snippet: `36 passed`
   - suite locale dopo fix F23 (snippet centrati sulla colonna del match): `41 passed`
+  - suite locale dopo fix F10 + F16 (argomenti piatti + logs_triage): `49 passed`
 
 ## Prossimi step consigliati
 

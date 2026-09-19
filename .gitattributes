@@ -1,0 +1,6 @@
+# Cross-platform line endings (see .agent/HANDOFF.md):
+# shell scripts run on Linux (DGX) and must stay LF, Windows scripts must stay CRLF.
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+.gitattributes text eol=lf
