@@ -1,7 +1,12 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from headroom_agent_mcp.models import CommandAllowlistProfile, DiscoveryRequest, ObjectiveType
+from headroom_agent_mcp.models import (
+    CommandAllowlistProfile,
+    DiscoveryRequest,
+    DiscoveryResponse,
+    ObjectiveType,
+)
 from headroom_agent_mcp.service import DiscoveryService
 
 
@@ -115,3 +120,62 @@ def test_docs_research_uses_bounded_file_read_instead_of_path_read_text(tmp_path
 
     assert response.candidate_files
     assert any("headroom_agent_base_url" in finding.lower() for finding in response.relevant_findings)
+
+
+def _run_single_file_research(path: Path, needle: str) -> DiscoveryResponse:
+    request = DiscoveryRequest(
+        objective=f"Find {needle}",
+        objective_type=ObjectiveType.DOCS_RESEARCH,
+        scope_paths=[str(path)],
+        query_hints=[needle],
+        command_allowlist_profile=CommandAllowlistProfile.SAFE_READONLY,
+        max_files=2,
+        raw_read_budget=2,
+    )
+    return DiscoveryService().run(request)
+
+
+def _joined_snippets(response: DiscoveryResponse) -> str:
+    return "\n".join(snippet.snippet for snippet in response.small_snippets)
+
+
+def test_docs_research_keeps_match_visible_when_needle_is_at_end_of_long_line(tmp_path: Path) -> None:
+    needle = "NEEDLE_AT_THE_END_OF_A_LONG_LINE"
+    long_line = tmp_path / "bundle.js"
+    long_line.write_text(("x" * 8000) + needle + "\n", encoding="utf-8")
+
+    response = _run_single_file_research(long_line, needle)
+
+    assert response.candidate_files
+    assert response.small_snippets
+    assert needle in _joined_snippets(response)
+    assert not any("truncated" in item.lower() for item in response.uncertainties)
+
+
+def test_docs_research_keeps_match_visible_in_minified_single_line_json(tmp_path: Path) -> None:
+    needle = "MCP_SECRET_TOKEN"
+    minified = tmp_path / "data.min.json"
+    minified.write_text('{"payload":"' + ("y" * 3000) + '","token":"' + needle + '"}\n', encoding="utf-8")
+
+    response = _run_single_file_research(minified, needle)
+
+    assert response.candidate_files
+    assert needle in _joined_snippets(response)
+    assert not any("truncated" in item.lower() for item in response.uncertainties)
+
+
+def test_docs_research_keeps_prefix_snippet_for_normal_multiline_file(tmp_path: Path) -> None:
+    needle = "MCP_ENDPOINT"
+    source = tmp_path / "guide.md"
+    source.write_text(
+        "# Guide\n"
+        f"Set {needle} to configure the host.\n"
+        "Then restart the service.\n",
+        encoding="utf-8",
+    )
+
+    response = _run_single_file_research(source, needle)
+
+    joined = _joined_snippets(response)
+    assert needle in joined
+    assert "…" not in joined

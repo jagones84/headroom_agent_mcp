@@ -53,6 +53,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         Notes:
         - large files and fetched URLs are truncated to a bounded preview instead of being read fully into memory
         - when truncation happens, the response surfaces it through `uncertainties`
+        - snippets are excerpted around the matched column, so long single-line sources still contain the matched term
         """
 
         return service.run(params).model_dump()

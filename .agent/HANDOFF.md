@@ -36,6 +36,7 @@
 
 - Suite TDD locale aggiornata dopo grounding fix + LLM hardening 2026-09-19: `27 passed`
 - Suite locale finale dopo hardening large-file / bounded-fetch 2026-09-19: `38 passed`
+- Suite locale dopo fix F23 (snippet centrati sul match) 2026-09-19: `41 passed`
 - Comando usato:
   - `C:\Users\giova\.venvs\headroom_agent_mcp\Scripts\python -m pytest Z:\Repositories\headroom_agent_mcp\tests -q`
 - Nota ambiente:
@@ -94,11 +95,14 @@
   - F20 chiuso: i file molto grandi non causano piu' falsi negativi silenziosi senza avviso; se la lettura viene troncata il tool espone una `uncertainties` esplicita
   - F21 chiuso: le letture locali non usano piu' `Path.read_text()[:20000]`; ora leggono in modo bounded solo il preview necessario senza caricare tutto il file in memoria
   - F22 chiuso: anche il fetch diretto di URL e' bounded e la documentazione del tool/README ora dichiara esplicitamente questo limite operativo
+  - F23 chiuso: gli snippet non sono piu' tagliati dal solo prefisso del blocco; la finestra e' centrata sulla colonna del match, quindi su sorgenti a riga lunga (JS minificato, JSON su una riga, CSV/log a riga singola) l'evidenza contiene davvero il termine cercato invece di essere muta
+  - F23 verificato con 3 regressioni: needle in fondo a riga lunga, JSON minificato su una riga, e caso multi-riga normale che resta invariato (nessun marcatore di ellissi)
   - residui NON affrontati in questo passaggio:
     - fixture test trattate come log reali (`F10`)
     - analisi istanze multiple lato host (`F12`)
     - esercizio automatico del proxy Headroom nel wrapper DGX (`F13`)
   - suite locale dopo `response_language` esplicito + fairness round-robin snippet: `36 passed`
+  - suite locale dopo fix F23 (snippet centrati sulla colonna del match): `41 passed`
 
 ## Prossimi step consigliati
 

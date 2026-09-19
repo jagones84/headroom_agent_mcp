@@ -352,6 +352,26 @@ class DiscoveryService:
                         return symbols
         return symbols
 
+    @staticmethod
+    def _match_offset(lines: list[str], start: int, matched_index: int, terms: list[str]) -> int:
+        line_offset = sum(len(lines[index]) + 1 for index in range(start, matched_index))
+        matched_line_lower = lines[matched_index].lower()
+        columns = [matched_line_lower.find(term) for term in terms]
+        columns = [column for column in columns if column != -1]
+        column = min(columns) if columns else 0
+        return line_offset + column
+
+    @staticmethod
+    def _excerpt_around_match(block: str, match_offset: int, max_chars: int) -> str:
+        if max_chars <= 0 or len(block) <= max_chars or match_offset < max_chars:
+            return block[:max_chars]
+        half = max_chars // 2
+        window_start = max(match_offset - half, 0)
+        window_end = window_start + max_chars
+        prefix = "…" if window_start > 0 else ""
+        suffix = "…" if window_end < len(block) else ""
+        return prefix + block[window_start:window_end] + suffix
+
     def _build_snippets(self, documents: list[EvidenceDocument], request: DiscoveryRequest) -> list[SmallSnippet]:
         terms = self._search_terms(request)
         snippet_limit = min(max(request.raw_read_budget * 2, 1), 8)
@@ -372,7 +392,11 @@ class DiscoveryService:
                 end = min(matched_index + 3, len(lines))
                 if end <= covered_until:
                     continue
-                snippet = "\n".join(lines[start:end])[: self.request_defaults.max_snippet_chars]
+                block = "\n".join(lines[start:end])
+                match_offset = self._match_offset(lines, start, matched_index, terms)
+                snippet = self._excerpt_around_match(
+                    block, match_offset, self.request_defaults.max_snippet_chars
+                )
                 if not snippet.strip():
                     continue
                 doc_snippets.append(

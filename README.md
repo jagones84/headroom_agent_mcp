@@ -147,6 +147,7 @@ Current retrieval behavior:
 - directory scans collect standard source/docs/log files by suffix
 - directory scans also collect common config files by name, including `.env`, `.env.template`, `Dockerfile`, `Makefile`, and `Procfile`
 - snippet budget is now distributed across top documents in rounds, so one dense file does not starve the rest of the evidence set
+- snippet excerpts are centered on the match column, so long single-line sources (minified JS/JSON, long CSV rows, single-line logs) still include the matching term instead of a mute prefix
 - local file reads and direct URL fetches are bounded to the first 20,000 characters per source to cap memory usage and latency
 - when a source is truncated by that cap, the response adds an `uncertainties` warning instead of treating missing later matches as evidence of absence
 
