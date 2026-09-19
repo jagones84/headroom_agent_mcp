@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from headroom_agent_mcp.config import HeadroomAgentConfig
 from headroom_agent_mcp.models import (
     CommandAllowlistProfile,
@@ -9,7 +11,14 @@ from headroom_agent_mcp.models import (
     ObjectiveType,
 )
 from headroom_agent_mcp.service import DiscoveryService, EvidenceDocument
-from headroom_agent_mcp.websearch import SearchResult, extract_readable_text
+from headroom_agent_mcp.websearch import (
+    SearchResult,
+    _decode_duckduckgo_url,
+    _DuckDuckGoParser,
+    extract_readable_text,
+    resolve_search_chain,
+    search_web,
+)
 
 HTML_WITH_BOILERPLATE = (
     "<html><head>"
@@ -167,3 +176,95 @@ def test_url_text_limit_never_drops_below_file_read_limit() -> None:
 
 def test_repo_declares_websearch_module() -> None:
     assert (Path("src/headroom_agent_mcp/websearch.py")).is_file()
+
+
+DDG_HTML = (
+    '<div class="result">'
+    '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&amp;rut=abc">'
+    "Example Title</a>"
+    '<a class="result__snippet">A useful snippet.</a>'
+    "</div>"
+    '<div class="result">'
+    '<a class="result__a" href="https://plain.example/other">Second Result</a>'
+    '<div class="result__snippet">Another snippet.</div>'
+    "</div>"
+)
+
+
+def _boom(*_args: object, **_kwargs: object) -> list[SearchResult]:
+    raise RuntimeError("provider unavailable")
+
+
+def test_decode_duckduckgo_url_unwraps_redirects_and_passes_plain_links() -> None:
+    assert _decode_duckduckgo_url("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage") == "https://example.com/page"
+    assert _decode_duckduckgo_url("https://plain.example/x") == "https://plain.example/x"
+    assert _decode_duckduckgo_url("") == ""
+
+
+def test_duckduckgo_parser_extracts_titles_urls_and_snippets() -> None:
+    parser = _DuckDuckGoParser()
+    parser.feed(DDG_HTML)
+
+    assert [item["title"] for item in parser.results] == ["Example Title", "Second Result"]
+    assert parser.results[0]["url"] == "https://example.com/page"
+    assert parser.results[1]["url"] == "https://plain.example/other"
+    assert "useful snippet" in parser.results[0]["snippet"]
+    assert "Another snippet" in parser.results[1]["snippet"]
+
+
+def test_search_chain_orders_available_providers(monkeypatch) -> None:
+    monkeypatch.delenv("HEADROOM_AGENT_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.setenv("BRAVE_API_KEY", "b")
+
+    assert resolve_search_chain() == ["tavily", "brave", "duckduckgo"]
+    assert resolve_search_chain("brave") == ["brave", "tavily", "duckduckgo"]
+
+
+def test_search_chain_keeps_duckduckgo_when_no_keys_are_set(monkeypatch) -> None:
+    monkeypatch.delenv("HEADROOM_AGENT_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+
+    assert resolve_search_chain() == ["duckduckgo"]
+    assert resolve_search_chain("tavily") == ["duckduckgo"]
+
+
+def test_search_web_falls_back_to_the_next_provider(monkeypatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.setenv("BRAVE_API_KEY", "b")
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_tavily", _boom)
+    monkeypatch.setattr(
+        "headroom_agent_mcp.websearch._search_brave",
+        lambda query, limit, api_key: [SearchResult(title="Brave hit", url="https://b.example", snippet="s")],
+    )
+
+    results, provider = search_web("query", 3)
+
+    assert provider == "brave"
+    assert results[0].url == "https://b.example"
+
+
+def test_search_web_uses_keyless_duckduckgo_when_keyed_providers_fail(monkeypatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_tavily", _boom)
+    monkeypatch.setattr(
+        "headroom_agent_mcp.websearch._search_duckduckgo",
+        lambda query, limit, api_key=None: [SearchResult(title="DDG hit", url="https://d.example", snippet="s")],
+    )
+
+    results, provider = search_web("query", 2)
+
+    assert provider == "duckduckgo"
+    assert results[0].url == "https://d.example"
+
+
+def test_search_web_raises_when_every_provider_errors(monkeypatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_tavily", _boom)
+    monkeypatch.setattr("headroom_agent_mcp.websearch._search_duckduckgo", _boom)
+
+    with pytest.raises(RuntimeError):
+        search_web("query", 2)

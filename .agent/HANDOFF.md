@@ -168,6 +168,16 @@ Obiettivo: tenere ~75% di risparmio **senza** degradare il summary, dando al LLM
   - in `proxy.jsonl` il campo `request_messages` registra i messaggi **prima** dell'iniezione del tool: `retrieve_tool=0` li' NON significa che il tool non sia stato iniettato
   - nuovi script diagnostici: `scripts/inspect_proxy_jsonl_dgx.py`, `scripts/measure_ccr_retrieval_dgx.sh`, `scripts/probe_ccr_retrieval_dgx.{py,sh}`
 
+## Web search fallback chain (2026-09-19, sessione 3)
+
+- Prima `websearch.py` sceglieva UN provider con priorita' secca (tavily > brave) e **non aveva alcun fallback**: se quello scelto falliva, risultato vuoto + incertezza.
+- Ora c'e' una catena: `resolve_search_chain()` -> `tavily` -> `brave` -> `duckduckgo`; `search_web()` prova in ordine e vince il primo che ritorna risultati.
+- DuckDuckGo e' **keyless**: fallback sempre disponibile. Parsa l'endpoint no-JS `html.duckduckgo.com` con un `HTMLParser` stdlib (`_DuckDuckGoParser` + `_decode_duckduckgo_url` per de-rimbalzare i link `uddg=`). Nessuna dipendenza nuova.
+- `search_provider` esplicito ora **ordina** la catena (mette quel provider per primo) invece di sceglierne uno solo; `HEADROOM_AGENT_SEARCH_PROVIDER` fa lo stesso da env.
+- Se TUTTI i provider vanno in errore -> `search_web` solleva e `service.py` riporta "Web search failed"; se uno ritorna vuoto -> incertezza con il provider provato.
+- Verifica: 7 test nuovi (catena, fallback, parser DDG, decode URL) -> suite locale `73 passed`.
+- Verifica LIVE sul DGX (venv `headroom_agent_mcp`): `search_web("headroom context compression", 5, "duckduckgo")` -> `provider_used=duckduckgo results=5`, titoli reali e URL de-rimbalzati. Da Windows la stessa chiamata viene resettata (`WinError 10054`) -> blocco anti-bot/host-local, non un bug del codice; il MCP gira sul DGX dove funziona.
+
 ## Prossimi step consigliati
 
 1. Integrazione live OpenClaw completata il `2026-09-19`:

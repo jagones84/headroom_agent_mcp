@@ -46,7 +46,7 @@ Input highlights:
 - `command_allowlist_profile`: `safe_readonly` or `safe_terminal`
 - `response_language`: optional output language for LLM enrichment; default `en`
 - `search_results_limit`: `web_research` only, 1-10 results per query; default `5`
-- `search_provider`: `web_research` only, `brave` | `tavily` | auto-detect from the environment
+- `search_provider`: `web_research` only, `brave` | `tavily` | `duckduckgo` | auto; picks which provider is tried first, the others stay as fallbacks
 
 The tool accepts the fields either **flat** (recommended) or bundled inside a legacy `params` object.
 Both forms are valid, so existing callers keep working:
@@ -67,7 +67,9 @@ Both forms are valid, so existing callers keep working:
 `web_research` extra behavior:
 - the whole search is delegated to this tool: it queries the backend, then fetches every result
 - fetched HTML is reduced to readable text (trafilatura when installed, a stdlib HTML parser otherwise) before any preview is built
-- `BRAVE_API_KEY` and `TAVILY_API_KEY` are read from the environment; with neither, the run reports an uncertainty instead of inventing sources
+- providers are tried in order and the first one that returns results wins: `tavily` -> `brave` -> `duckduckgo`
+- `TAVILY_API_KEY` / `BRAVE_API_KEY` gate the first two; **DuckDuckGo needs no key** and is always the last fallback (it parses the no-JS `html.duckduckgo.com` endpoint, so it can be rate-limited)
+- if every provider errors, the run reports an uncertainty naming them; if a provider just returns nothing, the response states which one was tried
 
 Output highlights:
 - `relevant_findings`
@@ -171,7 +173,8 @@ Copy `.env.template` to `.env` or export the variables in your runtime:
 - `HEADROOM_PROXY_URL` (optional)
 - `HEADROOM_AGENT_TIMEOUT_SECONDS` (default `45`; `120` when `HEADROOM_PROXY_URL` is set, because compression adds latency)
 - `HEADROOM_AGENT_LLM_EVIDENCE_CHARS` (raw evidence characters handed to the delegated LLM; default `12000`, `40000` when `HEADROOM_PROXY_URL` is set)
-- `BRAVE_API_KEY` / `TAVILY_API_KEY` (web search backends for `web_research`)
+- `BRAVE_API_KEY` / `TAVILY_API_KEY` (keyed web search backends; `web_research` always keeps the keyless `duckduckgo` fallback)
+- `HEADROOM_AGENT_SEARCH_PROVIDER` (optional; pins which search provider is tried first)
 
 If `HEADROOM_PROXY_URL` is set, the configured LLM profile routes through it, the evidence budget and the request timeout grow, and the proxy compresses the subagent's own prompt before it reaches the provider.
 
@@ -346,7 +349,7 @@ Implemented:
 - safe terminal policy
 - deterministic discovery service
 - optional OpenAI-compatible LLM enrichment
-- web search (`brave` / `tavily`) with readability extraction
+- web search (`tavily` / `brave` / keyless `duckduckgo`) with readability extraction and provider fallback
 - MCP server and CLI smoke check
 
 Not implemented:

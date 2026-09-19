@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -13,6 +14,12 @@ SEARCH_TIMEOUT_SECONDS = 20.0
 FETCH_TIMEOUT_SECONDS = 20.0
 FETCH_MAX_CHARS = 2_000_000
 USER_AGENT = "headroom-agent-discovery/0.1 (+https://github.com/jagones84/headroom_agent_mcp)"
+DUCKDUCKGO_ENDPOINT = "https://html.duckduckgo.com/html/"
+DUCKDUCKGO_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+DEFAULT_PROVIDER_ORDER = ("tavily", "brave", "duckduckgo")
 
 SKIP_TAGS = {
     "script",
@@ -206,29 +213,136 @@ def _search_brave(query: str, limit: int, api_key: str) -> list[SearchResult]:
     return results
 
 
-def resolve_search_provider(provider: str | None = None) -> str | None:
-    """Pick the search backend from an explicit value, env, or available keys."""
+def _decode_duckduckgo_url(href: str) -> str:
+    """Unwrap DuckDuckGo's redirect link into the real destination URL."""
+    if not href:
+        return ""
+    target = href
+    if target.startswith("//"):
+        target = f"https:{target}"
+    parsed = urlparse(target)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        redirected = parse_qs(parsed.query).get("uddg", [""])[0]
+        if redirected:
+            return unquote(redirected)
+    return target
+
+
+class _DuckDuckGoParser(HTMLParser):
+    """Dependency-free parser for the DuckDuckGo HTML results page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._in_title = False
+        self._in_snippet = False
+        self._title_parts: list[str] = []
+        self._current_url = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        classes = (dict(attrs).get("class") or "").split()
+        if tag == "a" and "result__a" in classes:
+            self._in_title = True
+            self._title_parts = []
+            self._current_url = dict(attrs).get("href") or ""
+        elif "result__snippet" in classes:
+            self._in_snippet = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._in_title:
+            self._in_title = False
+            url = _decode_duckduckgo_url(self._current_url)
+            if url:
+                self.results.append({"title": "".join(self._title_parts).strip(), "url": url, "snippet": ""})
+        elif self._in_snippet and tag in {"a", "div", "span"}:
+            self._in_snippet = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_parts.append(data)
+        elif self._in_snippet and self.results:
+            self.results[-1]["snippet"] += data
+
+
+def _search_duckduckgo(query: str, limit: int, api_key: str | None = None) -> list[SearchResult]:
+    """Keyless DuckDuckGo fallback via the no-JS HTML endpoint."""
+    response = httpx.post(
+        DUCKDUCKGO_ENDPOINT,
+        data={"q": query},
+        headers={"User-Agent": DUCKDUCKGO_USER_AGENT},
+        timeout=SEARCH_TIMEOUT_SECONDS,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    parser = _DuckDuckGoParser()
+    parser.feed(response.text)
+    results: list[SearchResult] = []
+    for item in parser.results:
+        if not item["url"]:
+            continue
+        results.append(
+            SearchResult(
+                title=item["title"],
+                url=item["url"],
+                snippet=item["snippet"].strip(),
+            )
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _provider_available(name: str) -> bool:
+    """Report whether a provider can run with the current environment."""
+    if name == "tavily":
+        return bool(os.getenv("TAVILY_API_KEY", "").strip())
+    if name == "brave":
+        return bool(os.getenv("BRAVE_API_KEY", "").strip())
+    if name == "duckduckgo":
+        return True
+    return False
+
+
+def resolve_search_chain(provider: str | None = None) -> list[str]:
+    """Return the ordered providers to try, honouring an explicit preference.
+
+    Sources: search/provider selection extends the existing auto behaviour with a
+    keyless fallback; DuckDuckGo has no official API, so it is used last.
+    """
     requested = (provider or os.getenv("HEADROOM_AGENT_SEARCH_PROVIDER") or "auto").strip().lower()
-    has_brave = bool(os.getenv("BRAVE_API_KEY", "").strip())
-    has_tavily = bool(os.getenv("TAVILY_API_KEY", "").strip())
-    if requested == "brave":
-        return "brave" if has_brave else None
-    if requested == "tavily":
-        return "tavily" if has_tavily else None
-    if has_tavily:
-        return "tavily"
-    if has_brave:
-        return "brave"
-    return None
+    order = list(DEFAULT_PROVIDER_ORDER)
+    if requested in DEFAULT_PROVIDER_ORDER:
+        order.remove(requested)
+        order.insert(0, requested)
+    return [name for name in order if _provider_available(name)]
+
+
+def resolve_search_provider(provider: str | None = None) -> str | None:
+    """Pick the first usable search backend from an explicit value, env, or keys."""
+    chain = resolve_search_chain(provider)
+    return chain[0] if chain else None
 
 
 def search_web(query: str, limit: int, provider: str | None = None) -> tuple[list[SearchResult], str | None]:
-    """Run a web search and return (results, provider_used)."""
-    resolved = resolve_search_provider(provider)
-    if resolved is None:
+    """Run a web search trying each provider in order and return (results, provider_used)."""
+    chain = resolve_search_chain(provider)
+    if not chain:
         return [], None
-    if resolved == "tavily":
-        api_key = os.getenv("TAVILY_API_KEY", "").strip()
-        return _search_tavily(query, limit, api_key), resolved
-    api_key = os.getenv("BRAVE_API_KEY", "").strip()
-    return _search_brave(query, limit, api_key), resolved
+    failures: list[str] = []
+    for name in chain:
+        try:
+            if name == "tavily":
+                results = _search_tavily(query, limit, os.getenv("TAVILY_API_KEY", "").strip())
+            elif name == "brave":
+                results = _search_brave(query, limit, os.getenv("BRAVE_API_KEY", "").strip())
+            else:
+                results = _search_duckduckgo(query, limit)
+        except Exception as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        if results:
+            return results, name
+        failures.append(f"{name}: no results")
+    if failures and all("no results" not in failure for failure in failures):
+        raise RuntimeError("; ".join(failures))
+    return [], chain[-1]
