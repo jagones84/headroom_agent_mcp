@@ -20,3 +20,6 @@ scripts/*.pid
 *.egg-info/
 dist/
 build/
+
+# local operator memory (never shipped)
+.agent/
